@@ -1,3 +1,4 @@
+use crate::geometry::Rect;
 use crate::scene_graph::{Scene, Target};
 use crate::{Axis, Direction, PlaceAlign};
 
@@ -13,8 +14,45 @@ pub fn move_target(scene: &Scene, id: &str, dx: f64, dy: f64) -> anyhow::Result<
     })
 }
 
-pub fn align(_scene: &Scene, _ids: &[String], _axis: Axis) -> anyhow::Result<Change> {
-    anyhow::bail!("not implemented")
+pub fn align(scene: &Scene, ids: &[String], axis: Axis) -> anyhow::Result<Change> {
+    if ids.len() < 2 {
+        anyhow::bail!("align needs at least 2 ids");
+    }
+    let resolved = resolve_boxes(scene, ids)?;
+    let anchor = resolved[0].1;
+    let mut moves = Vec::new();
+    for (id, rect) in resolved.into_iter().skip(1) {
+        let (dx, dy) = match axis {
+            Axis::Left => (anchor.x1 - rect.x1, 0.0),
+            Axis::Center => (anchor.center().x - rect.center().x, 0.0),
+            Axis::Right => (anchor.x2 - rect.x2, 0.0),
+            Axis::Top => (0.0, anchor.y1 - rect.y1),
+            Axis::Middle => (0.0, anchor.center().y - rect.center().y),
+            Axis::Bottom => (0.0, anchor.y2 - rect.y2),
+        };
+        moves.push((id, dx, dy));
+    }
+    Ok(Change {
+        moves,
+        resizes: vec![],
+    })
+}
+
+fn resolve_boxes(scene: &Scene, ids: &[String]) -> anyhow::Result<Vec<(String, Rect)>> {
+    let mut resolved = Vec::with_capacity(ids.len());
+    for id in ids {
+        let resolved_id = match scene.resolve(id)? {
+            Target::Component(id) | Target::Container(id) => id,
+            Target::Connector(_) => {
+                anyhow::bail!("target must be a component or container")
+            }
+        };
+        let rect = scene
+            .rect_of(&resolved_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown id \"{resolved_id}\""))?;
+        resolved.push((resolved_id, rect));
+    }
+    Ok(resolved)
 }
 
 pub fn distribute(
@@ -28,16 +66,80 @@ pub fn distribute(
 
 #[allow(clippy::too_many_arguments)]
 pub fn place(
-    _scene: &Scene,
-    _id: &str,
-    _right_of: Option<&str>,
-    _left_of: Option<&str>,
-    _below: Option<&str>,
-    _above: Option<&str>,
-    _gap: Option<f64>,
-    _align: PlaceAlign,
+    scene: &Scene,
+    id: &str,
+    right_of: Option<&str>,
+    left_of: Option<&str>,
+    below: Option<&str>,
+    above: Option<&str>,
+    gap: Option<f64>,
+    align: PlaceAlign,
 ) -> anyhow::Result<Change> {
-    anyhow::bail!("not implemented")
+    let gap = gap.unwrap_or(40.0);
+    let (moved_id, moved) = resolve_box(scene, id)?;
+    let (dx, dy) = if let Some(anchor_id) = right_of {
+        let (_, anchor) = resolve_box(scene, anchor_id)?;
+        (
+            anchor.x2 + gap - moved.x1,
+            cross_delta(anchor, moved, false, &align),
+        )
+    } else if let Some(anchor_id) = left_of {
+        let (_, anchor) = resolve_box(scene, anchor_id)?;
+        (
+            anchor.x1 - gap - moved.x2,
+            cross_delta(anchor, moved, false, &align),
+        )
+    } else if let Some(anchor_id) = below {
+        let (_, anchor) = resolve_box(scene, anchor_id)?;
+        (
+            cross_delta(anchor, moved, true, &align),
+            anchor.y2 + gap - moved.y1,
+        )
+    } else if let Some(anchor_id) = above {
+        let (_, anchor) = resolve_box(scene, anchor_id)?;
+        (
+            cross_delta(anchor, moved, true, &align),
+            anchor.y1 - gap - moved.y2,
+        )
+    } else {
+        anyhow::bail!("place needs exactly one of --right-of, --left-of, --below, --above");
+    };
+    Ok(Change {
+        moves: vec![(moved_id, dx, dy)],
+        resizes: vec![],
+    })
+}
+
+fn cross_delta(anchor: Rect, moved: Rect, horizontal: bool, align: &PlaceAlign) -> f64 {
+    let (anchor_start, anchor_mid, anchor_end, moved_start, moved_mid, moved_end) = if horizontal {
+        (
+            anchor.x1,
+            anchor.center().x,
+            anchor.x2,
+            moved.x1,
+            moved.center().x,
+            moved.x2,
+        )
+    } else {
+        (
+            anchor.y1,
+            anchor.center().y,
+            anchor.y2,
+            moved.y1,
+            moved.center().y,
+            moved.y2,
+        )
+    };
+    match align {
+        PlaceAlign::Start => anchor_start - moved_start,
+        PlaceAlign::Center => anchor_mid - moved_mid,
+        PlaceAlign::End => anchor_end - moved_end,
+    }
+}
+
+fn resolve_box(scene: &Scene, id: &str) -> anyhow::Result<(String, Rect)> {
+    let resolved = resolve_boxes(scene, &[id.to_string()])?;
+    Ok(resolved.into_iter().next().expect("one id"))
 }
 
 pub fn fit_container(_scene: &Scene, _id: &str, _padding: Option<f64>) -> anyhow::Result<Change> {
@@ -52,4 +154,129 @@ pub fn fit_text(
     _padding_y: Option<f64>,
 ) -> anyhow::Result<Change> {
     anyhow::bail!("not implemented")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene_graph::Scene;
+    use crate::schema::Document;
+
+    fn scene_of(src: &str) -> (Document, Scene) {
+        let doc = Document::parse(src).expect("parse");
+        let scene = Scene::build(&doc);
+        (doc, scene)
+    }
+
+    fn two_boxes() -> (Document, Scene) {
+        scene_of(
+            r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "A", "x": 10, "y": 20, "width": 100, "height": 40},
+    {"type": "rectangle", "id": "B", "x": 200, "y": 80, "width": 50, "height": 30}
+  ]
+}"#,
+        )
+    }
+
+    fn moved(scene: &Scene, ids: &[&str], axis: Axis) -> (f64, f64) {
+        let change = align(
+            scene,
+            &ids.iter().map(|id| (*id).to_string()).collect::<Vec<_>>(),
+            axis,
+        )
+        .expect("align");
+        assert_eq!(change.moves.len(), 1, "{:?}", change.moves);
+        let (id, dx, dy) = &change.moves[0];
+        assert_eq!(id, "B");
+        (*dx, *dy)
+    }
+
+    #[test]
+    fn align_left_matches_anchor_x1() {
+        let (_doc, scene) = two_boxes();
+        let (dx, dy) = moved(&scene, &["A", "B"], Axis::Left);
+        assert_eq!((dx, dy), (10.0 - 200.0, 0.0));
+    }
+
+    #[test]
+    fn align_center_matches_anchor_center_x() {
+        let (_doc, scene) = two_boxes();
+        let (dx, dy) = moved(&scene, &["A", "B"], Axis::Center);
+        // A center.x = 60, B center.x = 225
+        assert_eq!((dx, dy), (60.0 - 225.0, 0.0));
+    }
+
+    #[test]
+    fn align_right_matches_anchor_x2() {
+        let (_doc, scene) = two_boxes();
+        let (dx, dy) = moved(&scene, &["A", "B"], Axis::Right);
+        // A.x2 = 110, B.x2 = 250
+        assert_eq!((dx, dy), (110.0 - 250.0, 0.0));
+    }
+
+    #[test]
+    fn align_top_matches_anchor_y1() {
+        let (_doc, scene) = two_boxes();
+        let (dx, dy) = moved(&scene, &["A", "B"], Axis::Top);
+        assert_eq!((dx, dy), (0.0, 20.0 - 80.0));
+    }
+
+    #[test]
+    fn align_bottom_matches_anchor_y2() {
+        let (_doc, scene) = two_boxes();
+        let (dx, dy) = moved(&scene, &["A", "B"], Axis::Bottom);
+        // A.y2 = 60, B.y2 = 110
+        assert_eq!((dx, dy), (0.0, 60.0 - 110.0));
+    }
+
+    fn placed(
+        scene: &Scene,
+        left_of: Option<&str>,
+        above: Option<&str>,
+        align: PlaceAlign,
+    ) -> (f64, f64) {
+        let change =
+            place(scene, "B", None, left_of, None, above, Some(40.0), align).expect("place");
+        assert_eq!(change.moves.len(), 1);
+        let (id, dx, dy) = &change.moves[0];
+        assert_eq!(id, "B");
+        (*dx, *dy)
+    }
+
+    #[test]
+    fn place_left_of_sets_x2_and_centers_vertically() {
+        let (_doc, scene) = two_boxes();
+        let (dx, dy) = placed(&scene, Some("A"), None, PlaceAlign::Center);
+        // B.x2 = A.x1 - 40 => 250 + dx = 10 - 40 => dx = -280
+        // centers: A.cy = 40, B.cy = 95 => dy = -55
+        assert_eq!((dx, dy), (-280.0, -55.0));
+    }
+
+    #[test]
+    fn place_above_sets_y2_and_centers_horizontally() {
+        let (_doc, scene) = two_boxes();
+        let (dx, dy) = placed(&scene, None, Some("A"), PlaceAlign::Center);
+        // B.y2 = A.y1 - 40 => 110 + dy = 20 - 40 => dy = -130
+        // centers: A.cx = 60, B.cx = 225 => dx = -165
+        assert_eq!((dx, dy), (-165.0, -130.0));
+    }
+
+    #[test]
+    fn place_align_start_matches_leading_edge() {
+        let (_doc, scene) = two_boxes();
+        let (dx, dy) = placed(&scene, Some("A"), None, PlaceAlign::Start);
+        // left-of, start aligns y1: dy = 20 - 80 = -60; dx still -280
+        assert_eq!((dx, dy), (-280.0, -60.0));
+    }
+
+    #[test]
+    fn place_align_end_matches_trailing_edge() {
+        let (_doc, scene) = two_boxes();
+        let (dx, dy) = placed(&scene, None, Some("A"), PlaceAlign::End);
+        // above, end aligns x2: A.x2 = 110, B.x2 = 250 => dx = -140; dy still -130
+        assert_eq!((dx, dy), (-140.0, -130.0));
+    }
 }
