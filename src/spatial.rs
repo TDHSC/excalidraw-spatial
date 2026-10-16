@@ -1,5 +1,10 @@
+use std::collections::HashMap;
+
 use crate::geometry::Rect;
+use crate::linter::NEAR_MISS_MAX;
 use crate::scene_graph::{Component, Scene};
+
+const ALIGN_PX: f64 = 0.5;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Neighbor {
@@ -108,13 +113,18 @@ pub struct Track {
 }
 
 pub fn rows(siblings: &[&Component]) -> Vec<Track> {
-    cluster(siblings, Axis::Row)
+    let raw_rows = cluster(siblings, Axis::Row);
+    let raw_cols = cluster(siblings, Axis::Column);
+    split_tracks(siblings, raw_rows, &raw_cols, Axis::Row)
 }
 
 pub fn columns(siblings: &[&Component]) -> Vec<Track> {
-    cluster(siblings, Axis::Column)
+    let raw_rows = cluster(siblings, Axis::Row);
+    let raw_cols = cluster(siblings, Axis::Column);
+    split_tracks(siblings, raw_cols, &raw_rows, Axis::Column)
 }
 
+#[derive(Clone, Copy)]
 enum Axis {
     Row,
     Column,
@@ -164,29 +174,181 @@ fn cluster(siblings: &[&Component], axis: Axis) -> Vec<Track> {
                 Axis::Row => a.rect.x1.total_cmp(&b.rect.x1),
                 Axis::Column => a.rect.y1.total_cmp(&b.rect.y1),
             });
-            let gaps: Vec<f64> = members
-                .windows(2)
-                .map(|pair| match axis {
-                    Axis::Row => pair[1].rect.x1 - pair[0].rect.x2,
-                    Axis::Column => pair[1].rect.y1 - pair[0].rect.y2,
-                })
-                .collect();
-            let pos = members
-                .iter()
-                .map(|c| match axis {
-                    Axis::Row => c.rect.center().y,
-                    Axis::Column => c.rect.center().x,
-                })
-                .sum::<f64>()
-                / members.len() as f64;
-            Track {
-                parent: parent.clone(),
-                members: members.iter().map(|c| c.id.clone()).collect(),
-                gaps,
-                pos,
-            }
+            track_from_members(&members, parent.clone(), axis)
         })
         .collect()
+}
+
+fn track_from_members(members: &[&Component], parent: Option<String>, axis: Axis) -> Track {
+    let gaps: Vec<f64> = members
+        .windows(2)
+        .map(|pair| match axis {
+            Axis::Row => pair[1].rect.x1 - pair[0].rect.x2,
+            Axis::Column => pair[1].rect.y1 - pair[0].rect.y2,
+        })
+        .collect();
+    let pos = members
+        .iter()
+        .map(|c| match axis {
+            Axis::Row => c.rect.center().y,
+            Axis::Column => c.rect.center().x,
+        })
+        .sum::<f64>()
+        / members.len() as f64;
+    Track {
+        parent,
+        members: members.iter().map(|c| c.id.clone()).collect(),
+        gaps,
+        pos,
+    }
+}
+
+fn split_tracks(
+    siblings: &[&Component],
+    tracks: Vec<Track>,
+    orthogonal: &[Track],
+    axis: Axis,
+) -> Vec<Track> {
+    let lookup: HashMap<&str, &Component> = siblings.iter().map(|c| (c.id.as_str(), *c)).collect();
+    tracks
+        .into_iter()
+        .flat_map(|track| split_one(track, orthogonal, &lookup, axis))
+        .collect()
+}
+
+fn split_one(
+    track: Track,
+    orthogonal: &[Track],
+    lookup: &HashMap<&str, &Component>,
+    axis: Axis,
+) -> Vec<Track> {
+    if track.members.len() < 3 {
+        return vec![track];
+    }
+    let mut remove = vec![false; track.members.len()];
+    for (k, flag) in remove.iter_mut().enumerate() {
+        if orthogonally_locked(&track.members[k], orthogonal, lookup, axis)
+            && every_adjacent_misaligned(&track.members, k, lookup, axis)
+        {
+            *flag = true;
+        }
+    }
+    if !remove.iter().any(|&r| r) {
+        return vec![track];
+    }
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < track.members.len() {
+        if remove[start] {
+            start += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < track.members.len() && !remove[end] {
+            end += 1;
+        }
+        if end - start >= 2 {
+            let slice: Vec<&Component> = track.members[start..end]
+                .iter()
+                .map(|id| lookup[id.as_str()])
+                .collect();
+            out.push(track_from_members(&slice, track.parent.clone(), axis));
+        }
+        start = end;
+    }
+    out
+}
+
+fn orthogonally_locked(
+    id: &str,
+    orthogonal: &[Track],
+    lookup: &HashMap<&str, &Component>,
+    axis: Axis,
+) -> bool {
+    let Some(n) = lookup.get(id) else {
+        return false;
+    };
+    for other in orthogonal {
+        if other.members.len() < 2 {
+            continue;
+        }
+        let Some(idx) = other.members.iter().position(|m| m == id) else {
+            continue;
+        };
+        let prev = idx
+            .checked_sub(1)
+            .and_then(|i| lookup.get(other.members[i].as_str()).copied());
+        let next = other
+            .members
+            .get(idx + 1)
+            .and_then(|m| lookup.get(m.as_str()).copied());
+        if [prev, next]
+            .into_iter()
+            .flatten()
+            .any(|adj| lock_aligned(n, adj, axis))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn every_adjacent_misaligned(
+    members: &[String],
+    k: usize,
+    lookup: &HashMap<&str, &Component>,
+    axis: Axis,
+) -> bool {
+    let Some(n) = lookup.get(members[k].as_str()) else {
+        return false;
+    };
+    let mut saw_neighbor = false;
+    if k > 0 {
+        saw_neighbor = true;
+        let adj = lookup[members[k - 1].as_str()];
+        if !fully_misaligned(n, adj, axis) {
+            return false;
+        }
+    }
+    if k + 1 < members.len() {
+        saw_neighbor = true;
+        let adj = lookup[members[k + 1].as_str()];
+        if !fully_misaligned(n, adj, axis) {
+            return false;
+        }
+    }
+    saw_neighbor
+}
+
+fn lock_aligned(n: &Component, adj: &Component, axis: Axis) -> bool {
+    match axis {
+        Axis::Row => {
+            (n.rect.center().x - adj.rect.center().x).abs() < ALIGN_PX
+                || (n.rect.x1 - adj.rect.x1).abs() < ALIGN_PX
+                || (n.rect.x2 - adj.rect.x2).abs() < ALIGN_PX
+        }
+        Axis::Column => {
+            (n.rect.center().y - adj.rect.center().y).abs() < ALIGN_PX
+                || (n.rect.y1 - adj.rect.y1).abs() < ALIGN_PX
+                || (n.rect.y2 - adj.rect.y2).abs() < ALIGN_PX
+        }
+    }
+}
+
+fn fully_misaligned(n: &Component, adj: &Component, axis: Axis) -> bool {
+    let limit = f64::from(NEAR_MISS_MAX);
+    match axis {
+        Axis::Row => {
+            (n.rect.center().y - adj.rect.center().y).abs() > limit
+                && (n.rect.y1 - adj.rect.y1).abs() > limit
+                && (n.rect.y2 - adj.rect.y2).abs() > limit
+        }
+        Axis::Column => {
+            (n.rect.center().x - adj.rect.center().x).abs() > limit
+                && (n.rect.x1 - adj.rect.x1).abs() > limit
+                && (n.rect.x2 - adj.rect.x2).abs() > limit
+        }
+    }
 }
 
 fn member_range(c: &Component, axis: &Axis) -> (f64, f64) {
@@ -197,13 +359,13 @@ fn member_range(c: &Component, axis: &Axis) -> (f64, f64) {
 }
 
 fn track_range(members: &[&Component], axis: &Axis) -> (f64, f64, f64) {
-    let mut lo = f64::INFINITY;
-    let mut hi = f64::NEG_INFINITY;
+    let mut lo = f64::NEG_INFINITY;
+    let mut hi = f64::INFINITY;
     let mut min_h = f64::INFINITY;
     for c in members {
         let (a, b) = member_range(c, axis);
-        lo = lo.min(a);
-        hi = hi.max(b);
+        lo = lo.max(a);
+        hi = hi.min(b);
         min_h = min_h.min(b - a);
     }
     (lo, hi, min_h)
@@ -295,6 +457,11 @@ mod tests {
             frame_id: None,
             z,
         }
+    }
+
+    fn shape_xywh(id: &str, x: f64, y: f64, w: f64, h: f64, z: usize) -> Component {
+        let rect = Rect::from_xywh(x, y, w, h);
+        shape(id, (rect.x1, rect.y1, rect.x2, rect.y2), z)
     }
 
     #[test]
@@ -472,5 +639,97 @@ mod tests {
         let right = n.right.expect("right");
         assert_eq!(right.id, "low");
         approx_eq(right.gap, 40.0);
+    }
+
+    #[test]
+    fn tall_sidebar_does_not_bridge_rows() {
+        // B10: bus (0,60,80,280), r1_a (140,60,140,80), r1_b (500,60,140,80),
+        // r2_a (310,260,140,80), r2_b (500,260,140,80). Running intersection
+        // keeps the tall bus from pulling the lower pair into the top row.
+        let bus = shape_xywh("bus", 0.0, 60.0, 80.0, 280.0, 0);
+        let r1_a = shape_xywh("r1_a", 140.0, 60.0, 140.0, 80.0, 1);
+        let r1_b = shape_xywh("r1_b", 500.0, 60.0, 140.0, 80.0, 2);
+        let r2_a = shape_xywh("r2_a", 310.0, 260.0, 140.0, 80.0, 3);
+        let r2_b = shape_xywh("r2_b", 500.0, 260.0, 140.0, 80.0, 4);
+        let siblings = [&bus, &r1_a, &r1_b, &r2_a, &r2_b];
+
+        let rs = rows(&siblings);
+        assert_eq!(rs.len(), 2);
+        assert!(rs[0].parent.is_none());
+        assert_eq!(rs[0].members, ["bus", "r1_a", "r1_b"]);
+        assert_eq!(rs[0].gaps, [60.0, 220.0]);
+        approx_eq(rs[0].pos, 400.0 / 3.0);
+
+        assert!(rs[1].parent.is_none());
+        assert_eq!(rs[1].members, ["r2_a", "r2_b"]);
+        assert_eq!(rs[1].gaps, [50.0]);
+        approx_eq(rs[1].pos, 300.0);
+    }
+
+    #[test]
+    fn scatter_gather_shard_column_preserved() {
+        // B14: a scatter-gather row with a vertical shard stack that must stay
+        // a column, not get absorbed into the horizontal row.
+        let q_gw = shape_xywh("q_gw", 40.0, 370.0, 175.0, 75.0, 0);
+        let q_parse = shape_xywh("q_parse", 275.0, 370.0, 175.0, 75.0, 1);
+        let blender = shape_xywh("blender", 510.0, 370.0, 175.0, 75.0, 2);
+        let leaf1 = shape_xywh("leaf1", 745.0, 345.0, 175.0, 65.0, 3);
+        let leaf2 = shape_xywh("leaf2", 745.0, 430.0, 175.0, 65.0, 4);
+        let leaf3 = shape_xywh("leaf3", 745.0, 515.0, 175.0, 65.0, 5);
+        let ranker = shape_xywh("ranker", 970.0, 370.0, 175.0, 80.0, 6);
+        let siblings = [&q_gw, &q_parse, &blender, &leaf1, &leaf2, &leaf3, &ranker];
+
+        let cs = columns(&siblings);
+        assert!(
+            cs.iter().any(|t| t.members == ["leaf1", "leaf2", "leaf3"]),
+            "expected shard column [leaf1, leaf2, leaf3], got {cs:?}"
+        );
+
+        let rs = rows(&siblings);
+        assert_eq!(rs.len(), 1);
+        assert_eq!(rs[0].members, ["q_gw", "q_parse", "blender"]);
+        assert_eq!(rs[0].gaps, [60.0, 60.0]);
+        approx_eq(rs[0].pos, 407.5);
+        assert!(!rs[0].members.iter().any(|id| id == "leaf1"));
+        assert!(!rs[0].members.iter().any(|id| id == "leaf2"));
+        assert!(!rs[0].members.iter().any(|id| id == "leaf3"));
+        assert!(!rs.iter().any(|t| t.members.iter().any(|id| id == "ranker")));
+    }
+
+    #[test]
+    fn tall_node_without_column_lock_does_not_union_bridge_rows() {
+        // Intersection regression independent of Step 4: tall is NOT column-
+        // aligned with any other node, so orthogonal split cannot remove it.
+        // Geometry (xywh):
+        //   tall  (0,   0,  80, 300)  y=[0,300]   cy=150  cx=40
+        //   top_a (140, 0, 100,  80)  y=[0,80]    cy=40   cx=190
+        //   top_b (300, 0, 100,  80)  y=[0,80]    cy=40   cx=350
+        //   bot_a (140,220,100,  80)  y=[220,300] cy=260  cx=190
+        //   bot_b (300,220,100,  80)  y=[220,300] cy=260  cx=350
+        // Processing order by (center.y, x1): top_a, top_b, tall, bot_a, bot_b.
+        // Union [lo,hi] after {top_a, top_b, tall} is [0,300]; bot_a overlap
+        // with that union is 80 >= 0.5*min(80,80)=40, so union would swallow
+        // both bottom nodes into one five-member row.
+        // Intersection after {top_a, top_b, tall} is [0,80]; bot_a overlap
+        // with [0,80] is 0, so the bottom pair must form a separate row.
+        let tall = shape_xywh("tall", 0.0, 0.0, 80.0, 300.0, 0);
+        let top_a = shape_xywh("top_a", 140.0, 0.0, 100.0, 80.0, 1);
+        let top_b = shape_xywh("top_b", 300.0, 0.0, 100.0, 80.0, 2);
+        let bot_a = shape_xywh("bot_a", 140.0, 220.0, 100.0, 80.0, 3);
+        let bot_b = shape_xywh("bot_b", 300.0, 220.0, 100.0, 80.0, 4);
+        let siblings = [&tall, &top_a, &top_b, &bot_a, &bot_b];
+
+        let rs = rows(&siblings);
+        assert_eq!(rs.len(), 2);
+        assert_eq!(rs[0].members, ["tall", "top_a", "top_b"]);
+        // gaps: top_a.x1 - tall.x2 = 140-80 = 60; top_b.x1 - top_a.x2 = 300-240 = 60
+        assert_eq!(rs[0].gaps, [60.0, 60.0]);
+        // pos = mean center.y = (150+40+40)/3 = 230/3
+        approx_eq(rs[0].pos, 230.0 / 3.0);
+
+        assert_eq!(rs[1].members, ["bot_a", "bot_b"]);
+        // gaps: bot_b.x1 - bot_a.x2 = 300-240 = 60
+        assert_eq!(rs[1].gaps, [60.0]);
+        approx_eq(rs[1].pos, 260.0);
     }
 }
