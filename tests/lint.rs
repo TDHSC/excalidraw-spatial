@@ -3,6 +3,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use excalidraw_spatial::linter::run_lint;
+use excalidraw_spatial::scene_graph::Scene;
+use excalidraw_spatial::schema::Document;
+use excalidraw_spatial::text_metrics::TextSize;
+
 fn run(args: &[&str]) -> (i32, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_excal"))
         .args(args)
@@ -219,5 +224,114 @@ fn lint_zero_width_arrow_label_reports_estimated_collision() {
     assert!(
         stdout.contains(&format!("excal layout move {path_str} --id b --dx 104")),
         "stdout missing lengthen command:\n{stdout}"
+    );
+}
+
+#[test]
+fn unbound_title_and_subtitle_accumulate_envelope_size() {
+    // Title sits inside the box; the subtitle starts left of the box and its
+    // vertical span is not symmetric about the box center.
+    let scene = Scene::build(
+        &Document::parse(
+            r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "box", "x": 100, "y": 100, "width": 160, "height": 80},
+    {
+      "type": "text",
+      "id": "title",
+      "x": 150,
+      "y": 112,
+      "width": 60,
+      "height": 25,
+      "text": "Redis",
+      "fontSize": 20
+    },
+    {
+      "type": "text",
+      "id": "sub",
+      "x": 70,
+      "y": 145,
+      "width": 220,
+      "height": 20,
+      "text": "cluster-01.prod.internal:6379",
+      "fontSize": 16
+    }
+  ]
+}"#,
+        )
+        .expect("parse"),
+    );
+
+    let box_shape = scene.component("box").expect("box");
+    assert_eq!(box_shape.label.as_deref(), Some("Redis"));
+    assert_eq!(scene.notes.len(), 1);
+    assert_eq!(
+        box_shape.label_size,
+        Some(TextSize {
+            width: 220.0,
+            height: 50.0,
+            estimated: false,
+        })
+    );
+
+    let issues = run_lint(&scene, "b08.excalidraw");
+    let overflow = issues
+        .iter()
+        .find(|issue| issue.rule == "TEXT_OVERFLOW")
+        .expect("TEXT_OVERFLOW");
+    assert_eq!(
+        overflow.severity,
+        excalidraw_spatial::linter::Severity::Warn
+    );
+    assert_eq!(
+        overflow.message,
+        "label of box \"Redis\" needs 220x50px but the rectangle is 160x80px"
+    );
+}
+
+#[test]
+fn corner_badge_inside_usable_inner_box_does_not_overflow() {
+    // Bound "Main" plus an unbound badge that sits inside the padded inner box
+    // (x10..190, y8..92) of a 200x100 rectangle.
+    let scene = Scene::build(
+        &Document::parse(
+            r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "box", "x": 0, "y": 0, "width": 200, "height": 100},
+    {
+      "type": "text",
+      "id": "main",
+      "x": 70,
+      "y": 37.5,
+      "width": 60,
+      "height": 25,
+      "text": "Main",
+      "fontSize": 20,
+      "containerId": "box"
+    },
+    {
+      "type": "text",
+      "id": "tag",
+      "x": 15,
+      "y": 12,
+      "width": 30,
+      "height": 16,
+      "text": "v2",
+      "fontSize": 14
+    }
+  ]
+}"#,
+        )
+        .expect("parse"),
+    );
+
+    let issues = run_lint(&scene, "badge.excalidraw");
+    assert!(
+        issues.iter().all(|issue| issue.rule != "TEXT_OVERFLOW"),
+        "corner badge should not overflow: {issues:?}"
     );
 }

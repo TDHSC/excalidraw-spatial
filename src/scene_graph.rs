@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::geometry::{Point, Rect};
 use crate::linter::{
-    label_str, LintIssue, Severity, SHAPE_TYPES, ZONE_CHILD_AREA_RATIO, ZONE_CONTAINED_AREA_RATIO,
-    ZONE_TITLE_BAND,
+    label_str, text_factor, LintIssue, Severity, SHAPE_TYPES, TEXT_PAD_X, TEXT_PAD_Y,
+    ZONE_CHILD_AREA_RATIO, ZONE_CONTAINED_AREA_RATIO, ZONE_TITLE_BAND,
 };
 use crate::schema::{Document, RawElement};
 use crate::text_metrics::{text_rect, text_size, TextSize};
@@ -305,24 +305,18 @@ impl Scene {
             let text_center = free_rect.center();
             // Equal-area hosts: keep the first Shape in current component order
             // (document/z order for shapes created above).
-            let mut best: Option<usize> = None;
-            let mut best_area = f64::INFINITY;
-            for (index, component) in components.iter().enumerate() {
-                if component.kind != ComponentKind::Shape {
-                    continue;
-                }
-                let host_area = component.rect.area();
-                if host_area > text_area
-                    && component.rect.contains_point(text_center)
-                    && host_area < best_area
-                {
-                    best = Some(index);
-                    best_area = host_area;
-                }
-            }
-            let Some(index) = best else {
+            let index = smallest_absorbing_host(&components, text_area, |component| {
+                component.rect.contains_point(text_center)
+            })
+            .or_else(|| {
+                smallest_absorbing_host(&components, text_area, |component| {
+                    alignment_anchor_hits(component.rect, free_rect, el.text_align.as_deref())
+                })
+            });
+            let Some(index) = index else {
                 continue;
             };
+            let ts = text_size(el);
             let host = &mut components[index];
             host.elements.push(el.id.clone());
             if host.label.is_none() {
@@ -344,9 +338,23 @@ impl Scene {
                     command: None,
                 });
                 host.label = Some(text);
-                host.label_element = Some(el.id.clone());
-                host.label_size = Some(text_size(el));
             }
+            if host.label_element.is_none() {
+                host.label_element = Some(el.id.clone());
+            }
+            let req = absorbed_label_room(host, free_rect, ts.width, ts.height);
+            host.label_size = Some(match &host.label_size {
+                Some(prev) => TextSize {
+                    width: prev.width.max(req.0),
+                    height: prev.height.max(req.1),
+                    estimated: prev.estimated || ts.estimated,
+                },
+                None => TextSize {
+                    width: req.0,
+                    height: req.1,
+                    estimated: ts.estimated,
+                },
+            });
             claimed.insert(el.id.clone());
         }
 
@@ -534,6 +542,53 @@ impl Scene {
             }
         }
     }
+}
+
+fn smallest_absorbing_host(
+    components: &[Component],
+    text_area: f64,
+    matches: impl Fn(&Component) -> bool,
+) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_area = f64::INFINITY;
+    for (index, component) in components.iter().enumerate() {
+        if component.kind != ComponentKind::Shape {
+            continue;
+        }
+        let host_area = component.rect.area();
+        if host_area > text_area && matches(component) && host_area < best_area {
+            best = Some(index);
+            best_area = host_area;
+        }
+    }
+    best
+}
+
+fn alignment_anchor_hits(host: Rect, text: Rect, text_align: Option<&str>) -> bool {
+    let center = text.center();
+    if center.y < host.y1 || center.y > host.y2 {
+        return false;
+    }
+    let host_center_x = host.center().x;
+    match text_align {
+        Some("right") => host_center_x <= text.x2 && text.x2 <= host.x2,
+        Some("center") => false,
+        _ => host.x1 <= text.x1 && text.x1 <= host_center_x,
+    }
+}
+
+fn absorbed_label_room(host: &Component, text: Rect, width: f64, height: f64) -> (f64, f64) {
+    let f = text_factor(&host.type_name);
+    let hc = host.rect.center();
+    let inner_w = (host.rect.width() * f - f64::from(TEXT_PAD_X)).max(0.0);
+    let inner_h = (host.rect.height() * f - f64::from(TEXT_PAD_Y)).max(0.0);
+    let usable = Rect::from_xywh(hc.x - inner_w / 2.0, hc.y - inner_h / 2.0, inner_w, inner_h);
+    if usable.contains_rect(&text) {
+        return (width, height);
+    }
+    let env_w = 2.0 * (hc.x - text.x1).abs().max((text.x2 - hc.x).abs());
+    let env_h = 2.0 * (hc.y - text.y1).abs().max((text.y2 - hc.y).abs());
+    (width.max(env_w), height.max(env_h))
 }
 
 fn valid_elements(doc: &Document) -> Vec<&RawElement> {

@@ -30,6 +30,16 @@ pub const SHAPE_TYPES: &[&str] = &[
 
 pub const TEXT_SHAPES: &[&str] = &["rectangle", "stickynote", "ellipse", "diamond"];
 
+/// Usable fraction of a shape's box for its label. Ellipses and diamonds
+/// inscribe a smaller rectangle than their bounding box.
+pub fn text_factor(type_name: &str) -> f64 {
+    match type_name {
+        "ellipse" => 0.707,
+        "diamond" => 0.5,
+        _ => 1.0,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {

@@ -1,7 +1,7 @@
 use crate::geometry::fmt_px;
 use crate::linter::{
-    disp, LintIssue, Severity, NEAR_MISS_MAX, TEXT_PAD_X, TEXT_PAD_Y, TEXT_SHAPES, TIGHT_GAP,
-    UNEVEN_DIFF,
+    disp, text_factor, LintIssue, Severity, NEAR_MISS_MAX, TEXT_PAD_X, TEXT_PAD_Y, TEXT_SHAPES,
+    TIGHT_GAP, UNEVEN_DIFF,
 };
 use crate::scene_graph::{Component, ComponentKind, Scene};
 use crate::spatial::{self, Track};
@@ -62,14 +62,6 @@ pub fn uneven_spacing(scene: &Scene, file: &str) -> Vec<LintIssue> {
         emit_uneven(file, &spatial::columns(&siblings), "vertical", &mut issues);
     }
     issues
-}
-
-fn text_factor(type_name: &str) -> f64 {
-    match type_name {
-        "ellipse" => 0.707,
-        "diamond" => 0.5,
-        _ => 1.0,
-    }
 }
 
 fn sibling_groups(scene: &Scene) -> Vec<Vec<&Component>> {

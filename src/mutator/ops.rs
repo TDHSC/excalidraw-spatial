@@ -1,5 +1,5 @@
 use crate::geometry::{ceil_px, Rect};
-use crate::linter::{TEXT_PAD_X, TEXT_PAD_Y, TEXT_SHAPES};
+use crate::linter::{text_factor, TEXT_PAD_X, TEXT_PAD_Y, TEXT_SHAPES};
 use crate::scene_graph::{Component, ComponentKind, ContainerKind, Scene, Target};
 use crate::{Axis, Direction, PlaceAlign};
 
@@ -292,14 +292,6 @@ fn is_fit_text_eligible(component: &Component) -> bool {
         && TEXT_SHAPES.contains(&component.type_name.as_str())
         && component.label_element.is_some()
         && component.label_size.is_some()
-}
-
-fn text_factor(type_name: &str) -> f64 {
-    match type_name {
-        "ellipse" => 0.707,
-        "diamond" => 0.5,
-        _ => 1.0,
-    }
 }
 
 #[cfg(test)]

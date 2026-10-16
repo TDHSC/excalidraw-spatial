@@ -4,6 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use excalidraw_spatial::linter::run_lint;
+use excalidraw_spatial::scene_graph::Scene;
+use excalidraw_spatial::schema::Document;
+use excalidraw_spatial::text_metrics::TextSize;
+
 const FIXED_NOW_MS: &str = "1700000000000";
 
 fn bin() -> &'static str {
@@ -639,4 +644,89 @@ fn move_fetcher_toward_parser_clips_forward_at_4px_gap() {
     let points = arr["points"].as_array().expect("points");
     let end_x = points[1][0].as_f64().expect("end x");
     assert!(end_x > 0.0, "arrow flipped backwards: {}", arr["points"]);
+}
+
+#[test]
+fn fit_text_absorbs_left_anchored_overflow_and_clears_warnings() {
+    // Box 100..220 x 100..180. Unbound "Notification Service" starts in the
+    // left half (x=115) and runs past the right edge (x2=355), so its center
+    // (235, 140.5) is outside the box.
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "box", "x": 100, "y": 100, "width": 120, "height": 80},
+    {
+      "type": "text",
+      "id": "txt",
+      "x": 115,
+      "y": 128,
+      "width": 240,
+      "height": 25,
+      "text": "Notification Service",
+      "fontSize": 20
+    }
+  ]
+}"#;
+    let doc = Document::parse(src).expect("parse");
+    let scene = Scene::build(&doc);
+    assert_eq!(scene.components.len(), 1);
+    let box_shape = scene.component("box").expect("box");
+    assert_eq!(box_shape.label.as_deref(), Some("Notification Service"));
+    assert_eq!(
+        box_shape.label_size,
+        Some(TextSize {
+            width: 390.0,
+            height: 26.0,
+            estimated: false,
+        })
+    );
+
+    let issues = run_lint(&scene, "b07.excalidraw");
+    let rules: Vec<_> = issues.iter().map(|issue| issue.rule).collect();
+    assert!(
+        rules.contains(&"TEXT_OVERFLOW"),
+        "missing TEXT_OVERFLOW: {issues:?}"
+    );
+    assert!(
+        rules.contains(&"UNBOUND_TEXT"),
+        "missing UNBOUND_TEXT: {issues:?}"
+    );
+    assert!(
+        !rules.contains(&"OVERLAP_COMPONENT"),
+        "unbound label was treated as a separate component: {issues:?}"
+    );
+    let overflow = issues
+        .iter()
+        .find(|issue| issue.rule == "TEXT_OVERFLOW")
+        .expect("TEXT_OVERFLOW");
+    assert_eq!(
+        overflow.severity,
+        excalidraw_spatial::linter::Severity::Warn
+    );
+    assert!(
+        overflow.message.contains("needs 390x26px"),
+        "overflow message: {}",
+        overflow.message
+    );
+
+    let path = temp_path("b07-fit-text.excalidraw");
+    fs::write(&path, src).expect("write temp b07 file");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&["layout", "fit-text", path_str, "--id", "box"]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let out = parse_json(&stdout);
+    let box_el = element(&out, "box");
+    approx(num(box_el, "x"), -59.0);
+    approx(num(box_el, "width"), 438.0);
+    approx(num(box_el, "height"), 80.0);
+    assert!(
+        num(box_el, "x") <= 115.0 && num(box_el, "x") + num(box_el, "width") >= 355.0,
+        "resized box does not enclose txt x=115..355: {box_el}"
+    );
+
+    let after = lint_json(&stdout);
+    assert_eq!(after["summary"]["errors"], 0, "lint={after}");
+    assert_eq!(after["summary"]["warnings"], 0, "lint={after}");
 }
