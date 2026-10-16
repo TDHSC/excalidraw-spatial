@@ -384,3 +384,63 @@ fn system_design_pipeline_converges_cleanly() {
     assert_eq!(lint_json["summary"]["warnings"], 0, "lint={lint_json}");
     assert_eq!(lint_json["summary"]["info"], 0, "lint={lint_json}");
 }
+
+#[test]
+fn scatter_gather_in_tight_zone_cotranslates_and_grows() {
+    let tmp = make_temp_dir();
+    let path = tmp.0.join("scatter_zone.excalidraw");
+    // Compressed so l2_reranker's center starts inside z_query; distribute then
+    // pushes that center past the right edge and T28 grows the zone to keep it.
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "z_query", "x": 20, "y": 220, "width": 1250, "height": 360},
+    {"type": "text", "id": "z_query_title", "x": 36, "y": 232, "width": 80, "height": 25, "text": "Query", "fontSize": 20},
+    {"type": "rectangle", "id": "q_gw", "x": 40, "y": 370, "width": 175, "height": 75},
+    {"type": "rectangle", "id": "q_rewrite", "x": 255, "y": 370, "width": 175, "height": 75},
+    {"type": "rectangle", "id": "blender", "x": 470, "y": 370, "width": 175, "height": 75},
+    {"type": "rectangle", "id": "shard_1", "x": 685, "y": 265, "width": 175, "height": 75},
+    {"type": "rectangle", "id": "shard_2", "x": 685, "y": 370, "width": 175, "height": 75},
+    {"type": "rectangle", "id": "shard_3", "x": 685, "y": 475, "width": 175, "height": 75},
+    {"type": "rectangle", "id": "l1_ranker", "x": 900, "y": 370, "width": 175, "height": 75},
+    {"type": "rectangle", "id": "l2_reranker", "x": 1085, "y": 370, "width": 175, "height": 75}
+  ]
+}"#;
+    fs::write(&path, src).expect("write scatter zone");
+    let path_str = path.to_str().expect("utf8 path");
+    let (code, stdout, stderr) = run_layout_in_place(
+        path_str,
+        &[
+            "distribute",
+            "--ids",
+            "q_gw,q_rewrite,blender,shard_2,l1_ranker,l2_reranker",
+            "--direction",
+            "horizontal",
+            "--gap",
+            "90",
+        ],
+    );
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: lint after change: errors: 0, warnings: 0, info: 0"),
+        "stderr={stderr}"
+    );
+
+    let after = fs::read_to_string(&path).expect("read result");
+    let doc = excalidraw_spatial::schema::Document::parse(&after).expect("parse result");
+    let scene = excalidraw_spatial::scene_graph::Scene::build(&doc);
+    for id in ["shard_1", "shard_2", "shard_3"] {
+        approx(scene.component(id).unwrap().rect.x1, 835.0);
+    }
+    let l2 = scene.component("l2_reranker").unwrap();
+    approx(l2.rect.x1, 1365.0);
+    assert_eq!(l2.parent.as_deref(), Some("z_query"));
+    let zone = scene.container("z_query").expect("zone");
+    assert_eq!(
+        zone.kind,
+        excalidraw_spatial::scene_graph::ContainerKind::Zone
+    );
+    approx(zone.rect.x2, 1580.0);
+    approx(zone.rect.width(), 1560.0);
+}

@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::geometry::{ceil_px, Rect};
-use crate::linter::{text_factor, MIN_GAP, TEXT_PAD_X, TEXT_PAD_Y, TEXT_SHAPES};
+use crate::linter::{text_factor, MIN_GAP, NEAR_MISS_MAX, TEXT_PAD_X, TEXT_PAD_Y, TEXT_SHAPES};
 use crate::scene_graph::{zone_admits, Component, ComponentKind, ContainerKind, Scene, Target};
+use crate::spatial::{self, Track};
 use crate::{Axis, Direction, PlaceAlign};
 
 use super::Change;
@@ -134,21 +135,141 @@ pub fn distribute(
     };
     let mut prev = items[0].1;
     let mut moves = Vec::new();
-    for (id, rect) in items.into_iter().take(end).skip(1) {
+    for (id, rect) in items.iter().take(end).skip(1) {
         let (dx, dy) = if horizontal {
             (prev.x2 + gap - rect.x1, 0.0)
         } else {
             (0.0, prev.y2 + gap - rect.y1)
         };
-        moves.push((id, dx, dy));
+        moves.push((id.clone(), dx, dy));
         prev = rect.translate(dx, dy);
     }
+    // Co-translate a qualifying orthogonal stack before zone retention sees the moves.
+    let resolved_ids: HashSet<String> = items.iter().map(|(id, _)| id.clone()).collect();
+    cotranslate_orthogonal_stacks(scene, &resolved_ids, horizontal, &mut moves);
     let mut change = Change {
         moves,
         resizes: vec![],
     };
     retain_zone_membership(scene, &mut change, RetainPolicy::Arrange);
     Ok(change)
+}
+
+fn cotranslate_orthogonal_stacks(
+    scene: &Scene,
+    resolved_ids: &HashSet<String>,
+    horizontal: bool,
+    moves: &mut Vec<(String, f64, f64)>,
+) {
+    let primary: Vec<(String, f64, f64)> = moves
+        .iter()
+        .filter(|(_, dx, dy)| {
+            if horizontal {
+                dx.abs() > 1e-9
+            } else {
+                dy.abs() > 1e-9
+            }
+        })
+        .cloned()
+        .collect();
+    let already: HashSet<String> = moves.iter().map(|(id, _, _)| id.clone()).collect();
+    for (id, dx, dy) in primary {
+        let Some(node) = scene.component(&id) else {
+            continue;
+        };
+        if node.kind != ComponentKind::Shape && node.kind != ComponentKind::Group {
+            continue;
+        }
+        let sib = sibling_nodes(scene, node.parent.as_deref());
+        let ortho = if horizontal {
+            spatial::columns(&sib)
+        } else {
+            spatial::rows(&sib)
+        };
+        let parallel = if horizontal {
+            spatial::rows(&sib)
+        } else {
+            spatial::columns(&sib)
+        };
+        let Some(stack) = unique_track(&ortho, &id) else {
+            continue;
+        };
+        if !stack_qualifies(scene, stack, &id, resolved_ids, &parallel, horizontal) {
+            continue;
+        }
+        for member in &stack.members {
+            if member == &id || already.contains(member) {
+                continue;
+            }
+            if horizontal {
+                moves.push((member.clone(), dx, 0.0));
+            } else {
+                moves.push((member.clone(), 0.0, dy));
+            }
+        }
+    }
+}
+
+fn sibling_nodes<'a>(scene: &'a Scene, parent: Option<&str>) -> Vec<&'a Component> {
+    scene
+        .nodes()
+        .into_iter()
+        .filter(|component| component.parent.as_deref() == parent)
+        .collect()
+}
+
+fn unique_track<'a>(tracks: &'a [Track], id: &str) -> Option<&'a Track> {
+    let mut found = None;
+    for track in tracks {
+        if track.members.iter().any(|member| member == id) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(track);
+        }
+    }
+    found
+}
+
+fn stack_qualifies(
+    scene: &Scene,
+    stack: &Track,
+    moved_id: &str,
+    resolved_ids: &HashSet<String>,
+    parallel: &[Track],
+    horizontal: bool,
+) -> bool {
+    if stack
+        .members
+        .iter()
+        .any(|member| member != moved_id && resolved_ids.contains(member))
+    {
+        return false;
+    }
+    let limit = f64::from(NEAR_MISS_MAX);
+    for pair in stack.members.windows(2) {
+        let (Some(a), Some(b)) = (scene.component(&pair[0]), scene.component(&pair[1])) else {
+            return false;
+        };
+        let aligned = if horizontal {
+            (a.rect.center().x - b.rect.center().x).abs() <= limit
+                || (a.rect.x1 - b.rect.x1).abs() <= limit
+                || (a.rect.x2 - b.rect.x2).abs() <= limit
+        } else {
+            (a.rect.center().y - b.rect.center().y).abs() <= limit
+                || (a.rect.y1 - b.rect.y1).abs() <= limit
+                || (a.rect.y2 - b.rect.y2).abs() <= limit
+        };
+        if !aligned {
+            return false;
+        }
+    }
+    !stack.members.iter().any(|member| {
+        member != moved_id
+            && parallel
+                .iter()
+                .any(|track| track.members.iter().any(|id| id == member))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

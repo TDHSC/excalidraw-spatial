@@ -819,6 +819,184 @@ fn fit_text_absorbs_left_anchored_overflow_and_clears_warnings() {
     assert_eq!(after["summary"]["warnings"], 0, "lint={after}");
 }
 
+fn scatter_gather_pipeline(shard_2_x: f64) -> String {
+    format!(
+        r#"{{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {{"type": "rectangle", "id": "q_gw", "x": 40, "y": 370, "width": 175, "height": 75}},
+    {{"type": "rectangle", "id": "q_rewrite", "x": 275, "y": 370, "width": 175, "height": 75}},
+    {{"type": "rectangle", "id": "blender", "x": 510, "y": 370, "width": 175, "height": 75}},
+    {{"type": "rectangle", "id": "shard_1", "x": 745, "y": 265, "width": 175, "height": 75}},
+    {{"type": "rectangle", "id": "shard_2", "x": {shard_2_x}, "y": 370, "width": 175, "height": 75}},
+    {{"type": "rectangle", "id": "shard_3", "x": 745, "y": 475, "width": 175, "height": 75}},
+    {{"type": "rectangle", "id": "l1_ranker", "x": 1010, "y": 370, "width": 175, "height": 75}},
+    {{"type": "rectangle", "id": "l2_reranker", "x": 1245, "y": 370, "width": 175, "height": 75}}
+  ]
+}}"#
+    )
+}
+
+const SCATTER_IDS: &str = "q_gw,q_rewrite,blender,shard_2,l1_ranker,l2_reranker";
+
+fn distribute_scatter(src: &str, tag: &str) -> (i32, String, String) {
+    let path = temp_path(tag);
+    fs::write(&path, src).expect("write scatter-gather");
+    let path_str = path.to_str().expect("utf-8 path");
+    let result = run_layout(&[
+        "layout",
+        "distribute",
+        path_str,
+        "--ids",
+        SCATTER_IDS,
+        "--direction",
+        "horizontal",
+        "--gap",
+        "90",
+    ]);
+    cleanup(&path);
+    result
+}
+
+#[test]
+fn distribute_scatter_gather_stack_moves_as_a_unit() {
+    let src = scatter_gather_pipeline(745.0);
+    let path = temp_path("b17-lint.excalidraw");
+    fs::write(&path, &src).expect("write scatter-gather");
+    let path_str = path.to_str().expect("utf-8 path");
+    let lint = Command::new(bin())
+        .args(["lint", path_str, "--format", "json"])
+        .output()
+        .expect("lint");
+    cleanup(&path);
+    let lint_stdout = String::from_utf8(lint.stdout).expect("lint stdout");
+    let lint_json = parse_json(&lint_stdout);
+    let recommended = format!(
+        "excal layout distribute {path_str} --ids {SCATTER_IDS} --direction horizontal --gap 90"
+    );
+    let issues = lint_json["issues"].as_array().expect("issues");
+    assert!(
+        issues.iter().any(|issue| {
+            issue["rule"] == "UNEVEN_SPACING"
+                && issue["severity"] == "info"
+                && issue["command"] == recommended
+        }),
+        "missing UNEVEN_SPACING recommending {recommended}: {issues:?}"
+    );
+
+    let (code, stdout, stderr) = distribute_scatter(&src, "b17-aligned.excalidraw");
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: moved 7 item(s), resized 0 item(s), updated 0 connector(s)"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("excal: lint after change: errors: 0, warnings: 0, info: 0"),
+        "stderr={stderr}"
+    );
+
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "q_rewrite"), "x"), 305.0);
+    approx(num(element(&out, "blender"), "x"), 570.0);
+    for id in ["shard_1", "shard_2", "shard_3"] {
+        approx(num(element(&out, id), "x"), 835.0);
+    }
+    approx(num(element(&out, "shard_1"), "y"), 265.0);
+    approx(num(element(&out, "shard_2"), "y"), 370.0);
+    approx(num(element(&out, "shard_3"), "y"), 475.0);
+    approx(num(element(&out, "l1_ranker"), "x"), 1100.0);
+    approx(num(element(&out, "l2_reranker"), "x"), 1365.0);
+}
+
+#[test]
+fn distribute_near_miss_shard_stack_cotranslates_then_aligns() {
+    let (code, stdout, stderr) =
+        distribute_scatter(&scatter_gather_pipeline(749.0), "b17-near.excalidraw");
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "shard_2"), "x"), 835.0);
+    approx(num(element(&out, "shard_1"), "x"), 831.0);
+    approx(num(element(&out, "shard_3"), "x"), 831.0);
+
+    let path = temp_path("b17-align.excalidraw");
+    fs::write(&path, &stdout).expect("write near-miss result");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, aligned, stderr) = run_layout(&[
+        "layout",
+        "align",
+        path_str,
+        "--ids",
+        "shard_2,shard_1,shard_3",
+        "--axis",
+        "center",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={aligned} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: lint after change: errors: 0, warnings: 0, info: 0"),
+        "stderr={stderr}"
+    );
+    let out = parse_json(&aligned);
+    approx(num(element(&out, "shard_1"), "x"), 835.0);
+    approx(num(element(&out, "shard_3"), "x"), 835.0);
+}
+
+fn grid_3x3() -> String {
+    let mut elements = Vec::new();
+    for (row, y) in [(1, 0.0), (2, 160.0), (3, 320.0)] {
+        for (col, x) in [(1, 0.0), (2, 200.0), (3, 400.0)] {
+            elements.push(format!(
+                r#"{{"type": "rectangle", "id": "r{row}c{col}", "x": {x}, "y": {y}, "width": 140, "height": 80}}"#
+            ));
+        }
+    }
+    format!(
+        r#"{{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {}
+  ]
+}}"#,
+        elements.join(",\n    ")
+    )
+}
+
+#[test]
+fn distribute_middle_row_of_grid_does_not_cotranslate_other_rows() {
+    let path = temp_path("b17-grid.excalidraw");
+    fs::write(&path, grid_3x3()).expect("write grid");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "distribute",
+        path_str,
+        "--ids",
+        "r2c1,r2c2,r2c3",
+        "--direction",
+        "horizontal",
+        "--gap",
+        "100",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("excal: moved 2 item(s)"), "stderr={stderr}");
+
+    let out = parse_json(&stdout);
+    for (id, x, y) in [
+        ("r1c1", 0.0, 0.0),
+        ("r1c2", 200.0, 0.0),
+        ("r1c3", 400.0, 0.0),
+        ("r3c1", 0.0, 320.0),
+        ("r3c2", 200.0, 320.0),
+        ("r3c3", 400.0, 320.0),
+    ] {
+        approx(num(element(&out, id), "x"), x);
+        approx(num(element(&out, id), "y"), y);
+    }
+}
+
 fn lane_with_three_boxes() -> String {
     r#"{
   "type": "excalidraw",
