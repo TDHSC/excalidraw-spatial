@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::Parser;
 use excalidraw_spatial::formatter::ai_report::format_inspect;
 use excalidraw_spatial::formatter::ascii_map::render;
-use excalidraw_spatial::formatter::{format_lint_json, format_lint_text};
+use excalidraw_spatial::formatter::{format_inspect_json, format_lint_json, format_lint_text};
 use excalidraw_spatial::linter::{run_lint, Severity};
 use excalidraw_spatial::mutator::ops::{
     align, distribute, fit_container, fit_text, move_target, place,
@@ -11,9 +11,7 @@ use excalidraw_spatial::mutator::ops::{
 use excalidraw_spatial::mutator::{apply, Change};
 use excalidraw_spatial::scene_graph::Scene;
 use excalidraw_spatial::schema::Document;
-use excalidraw_spatial::{
-    not_implemented, Cli, Commands, InspectFormat, LayoutCommands, LintFormat, OutputArgs,
-};
+use excalidraw_spatial::{Cli, Commands, InspectFormat, LayoutCommands, LintFormat, OutputArgs};
 
 fn main() {
     let cli = Cli::parse();
@@ -30,9 +28,6 @@ fn main() {
 }
 
 fn inspect_cmd(file: &str, format: InspectFormat) -> i32 {
-    if matches!(format, InspectFormat::Json) {
-        return not_implemented();
-    }
     let doc = match Document::load(file) {
         Ok(doc) => doc,
         Err(e) => {
@@ -49,7 +44,10 @@ fn inspect_cmd(file: &str, format: InspectFormat) -> i32 {
             format_inspect(title, &scene, &issues)
         }
         InspectFormat::Ascii => render(&scene).join("\n") + "\n",
-        InspectFormat::Json => unreachable!(),
+        InspectFormat::Json => {
+            let issues = run_lint(&scene, lint_file);
+            format_inspect_json(file, &scene, &issues)
+        }
     };
     print!("{out}");
     0

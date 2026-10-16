@@ -131,19 +131,150 @@ fn inspect_empty_document_reports_empty_canvas_and_none_sections() {
     );
 }
 
+fn inspect_json(args: &[&str]) -> serde_json::Value {
+    let (code, stdout, stderr) = run(args);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.ends_with('\n'),
+        "inspect json must end with a newline"
+    );
+    serde_json::from_str(&stdout).unwrap_or_else(|err| panic!("inspect json: {err}\n{stdout}"))
+}
+
+fn assert_json_integers(value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Number(n) => {
+            assert!(
+                n.is_i64() || n.is_u64(),
+                "coordinates, sizes, gaps, and distances must be JSON integers, got {n}"
+            );
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                assert_json_integers(item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values() {
+                assert_json_integers(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[test]
-fn inspect_json_stays_unimplemented() {
-    let (code, _stdout, stderr) = run(&[
+fn inspect_json_basic_flow_reports_neighbor_gap_and_bound_attach() {
+    let v = inspect_json(&[
         "inspect",
         "tests/fixtures/basic_flow.excalidraw",
         "--format",
         "json",
     ]);
-    assert_eq!(code, 2);
-    assert!(
-        stderr.contains("not implemented"),
-        "json inspect belongs to T14, got {stderr:?}"
+    assert_eq!(v["file"], "tests/fixtures/basic_flow.excalidraw");
+    assert_eq!(v["components"].as_array().map(Vec::len), Some(3));
+    assert_eq!(
+        v["components"][1]["neighbors"]["left"],
+        serde_json::json!({"id": "client", "gap": 100})
     );
+    assert_eq!(
+        v["connectors"][0]["start"],
+        serde_json::json!({"attach": "bound", "target": "client", "element": "client"})
+    );
+    assert_json_integers(&v);
+}
+
+#[test]
+fn inspect_json_arrows_distinguishes_near_and_free_ends() {
+    let v = inspect_json(&[
+        "inspect",
+        "tests/fixtures/arrows.excalidraw",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(
+        v["connectors"][3]["end"],
+        serde_json::json!({"attach": "near", "target": "d", "distance": 8})
+    );
+    assert_eq!(
+        v["connectors"][2]["end"],
+        serde_json::json!({"attach": "free"})
+    );
+    assert_json_integers(&v);
+}
+
+#[test]
+fn inspect_json_text_layout_issues_match_lint_json() {
+    let inspect = inspect_json(&[
+        "inspect",
+        "tests/fixtures/text_layout.excalidraw",
+        "--format",
+        "json",
+    ]);
+    let (code, stdout, stderr) = run(&[
+        "lint",
+        "tests/fixtures/text_layout.excalidraw",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let lint: serde_json::Value = serde_json::from_str(&stdout).expect("lint json");
+    assert_eq!(inspect["issues"], lint["issues"]);
+    assert_json_integers(&inspect);
+}
+
+#[test]
+fn inspect_json_empty_scene_has_null_canvas() {
+    let path = std::env::temp_dir().join("excal-inspect-json-empty.excalidraw");
+    std::fs::write(&path, r#"{"type":"excalidraw","version":2,"elements":[]}"#)
+        .expect("write empty fixture");
+    let v = inspect_json(&["inspect", path.to_str().expect("path"), "--format", "json"]);
+    assert!(
+        v["canvas"].is_null(),
+        "empty scene canvas is null, got {}",
+        v["canvas"]
+    );
+    assert_eq!(v["components"], serde_json::json!([]));
+    assert_eq!(v["issues"], serde_json::json!([]));
+}
+
+#[test]
+fn inspect_json_text_component_neighbors_are_null() {
+    let path = std::env::temp_dir().join("excal-inspect-json-text.excalidraw");
+    std::fs::write(
+        &path,
+        r#"{"type":"excalidraw","version":2,"elements":[{"id":"note","type":"text","x":1.6,"y":2.4,"width":10.2,"height":8.6,"text":"hi","isDeleted":false}]}"#,
+    )
+    .expect("write text fixture");
+    let v = inspect_json(&["inspect", path.to_str().expect("path"), "--format", "json"]);
+    let note = &v["components"][0];
+    assert_eq!(note["kind"], "text");
+    assert!(
+        note["neighbors"].is_null(),
+        "text neighbors are null, got {}",
+        note["neighbors"]
+    );
+    assert_eq!(
+        note["rect"],
+        serde_json::json!({"x1": 2, "y1": 2, "x2": 12, "y2": 11})
+    );
+    assert_eq!(note["center"], serde_json::json!({"x": 7, "y": 7}));
+    assert!(note["rect"]["x1"].is_i64());
+}
+
+#[test]
+fn inspect_json_swimlanes_padding_keeps_negative_right() {
+    let v = inspect_json(&[
+        "inspect",
+        "tests/fixtures/swimlanes.excalidraw",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(
+        v["containers"][1]["padding"],
+        serde_json::json!({"top": 110, "right": -20, "bottom": 110, "left": 40})
+    );
+    assert_json_integers(&v);
 }
 
 #[test]
