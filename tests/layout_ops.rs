@@ -136,6 +136,97 @@ fn place_svc_below_api_resyncs_arrow_and_lints_clean() {
 }
 
 #[test]
+fn distribute_text_layout_horizontal_gap_spaces_n3_and_clears_uneven_spacing() {
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "distribute",
+        &fixture("text_layout"),
+        "--ids",
+        "n1,n2,n3",
+        "--direction",
+        "horizontal",
+        "--gap",
+        "60",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let out = parse_json(&stdout);
+
+    approx(num(element(&out, "n2"), "x"), 220.0);
+    approx(num(element(&out, "n3"), "x"), 440.0);
+    approx(num(element(&out, "n3-label"), "x"), 386.0);
+
+    let issues = lint_json(&stdout)["issues"]
+        .as_array()
+        .expect("issues")
+        .clone();
+    assert!(
+        issues.iter().all(|issue| issue["rule"] != "UNEVEN_SPACING"),
+        "still has UNEVEN_SPACING: {issues:?}"
+    );
+}
+
+#[test]
+fn distribute_text_layout_horizontal_without_gap_keeps_ends_fixed() {
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "distribute",
+        &fixture("text_layout"),
+        "--ids",
+        "n1,n2,n3",
+        "--direction",
+        "horizontal",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let out = parse_json(&stdout);
+
+    approx(num(element(&out, "n2"), "x"), 200.0);
+    approx(num(element(&out, "n2-label"), "x"), 212.4);
+    approx(num(element(&out, "n3"), "x"), 400.0);
+}
+
+#[test]
+fn distribute_arrows_vertical_gap_moves_d_and_shrinks_near_elbow() {
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "distribute",
+        &fixture("arrows"),
+        "--ids",
+        "c,d",
+        "--direction",
+        "vertical",
+        "--gap",
+        "60",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let out = parse_json(&stdout);
+
+    approx(num(element(&out, "d"), "y"), 240.0);
+    approx(num(element(&out, "d-label"), "y"), 267.5);
+    assert_eq!(
+        element(&out, "arr_near")["points"],
+        serde_json::json!([[0, 0], [0, 94], [142, 94]])
+    );
+}
+
+#[test]
+fn distribute_two_ids_without_gap_exits_2() {
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "distribute",
+        &fixture("overlap"),
+        "--ids",
+        "api,auth",
+        "--direction",
+        "horizontal",
+    ]);
+    assert_eq!(code, 2, "stdout={stdout} stderr={stderr}");
+    assert_eq!(
+        stderr, "excal: error: distribute without --gap needs at least 3 ids\n",
+        "stdout={stdout}"
+    );
+}
+
+#[test]
 fn place_auth_right_of_api_uses_default_gap_and_center() {
     let (code, stdout, stderr) = run_layout(&[
         "layout",

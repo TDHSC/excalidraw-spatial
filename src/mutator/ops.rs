@@ -56,12 +56,78 @@ fn resolve_boxes(scene: &Scene, ids: &[String]) -> anyhow::Result<Vec<(String, R
 }
 
 pub fn distribute(
-    _scene: &Scene,
-    _ids: &[String],
-    _direction: Direction,
-    _gap: Option<f64>,
+    scene: &Scene,
+    ids: &[String],
+    direction: Direction,
+    gap: Option<f64>,
 ) -> anyhow::Result<Change> {
-    anyhow::bail!("not implemented")
+    if ids.len() < 2 {
+        anyhow::bail!("distribute needs at least 2 ids");
+    }
+    let mut items = resolve_boxes(scene, ids)?;
+    let horizontal = matches!(direction, Direction::Horizontal);
+    // Stable sort: equal leading edges keep input order.
+    items.sort_by(|a, b| {
+        let key = |rect: Rect| if horizontal { rect.x1 } else { rect.y1 };
+        key(a.1)
+            .partial_cmp(&key(b.1))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let explicit = gap.is_some();
+    let gap = match gap {
+        Some(gap) => gap,
+        None => {
+            if items.len() < 3 {
+                anyhow::bail!("distribute without --gap needs at least 3 ids");
+            }
+            let first = items[0].1;
+            let last = items[items.len() - 1].1;
+            let middle: f64 = items[1..items.len() - 1]
+                .iter()
+                .map(|(_, rect)| {
+                    if horizontal {
+                        rect.width()
+                    } else {
+                        rect.height()
+                    }
+                })
+                .sum();
+            let span = if horizontal {
+                last.x1 - first.x2
+            } else {
+                last.y1 - first.y2
+            };
+            let computed = (span - middle) / (items.len() - 1) as f64;
+            if computed < 0.0 {
+                anyhow::bail!("not enough space to distribute; pass --gap");
+            }
+            computed
+        }
+    };
+
+    // First never moves. Without --gap the last stays fixed too, so floating-point
+    // rounding never writes a move for either end.
+    let end = if explicit {
+        items.len()
+    } else {
+        items.len() - 1
+    };
+    let mut prev = items[0].1;
+    let mut moves = Vec::new();
+    for (id, rect) in items.into_iter().take(end).skip(1) {
+        let (dx, dy) = if horizontal {
+            (prev.x2 + gap - rect.x1, 0.0)
+        } else {
+            (0.0, prev.y2 + gap - rect.y1)
+        };
+        moves.push((id, dx, dy));
+        prev = rect.translate(dx, dy);
+    }
+    Ok(Change {
+        moves,
+        resizes: vec![],
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -270,6 +336,36 @@ mod tests {
         let (dx, dy) = placed(&scene, Some("A"), None, PlaceAlign::Start);
         // left-of, start aligns y1: dy = 20 - 80 = -60; dx still -280
         assert_eq!((dx, dy), (-280.0, -60.0));
+    }
+
+    fn three_boxes() -> (Document, Scene) {
+        scene_of(
+            r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "A", "x": 0, "y": 0, "width": 40, "height": 20},
+    {"type": "rectangle", "id": "B", "x": 10, "y": 0, "width": 40, "height": 20},
+    {"type": "rectangle", "id": "C", "x": 20, "y": 0, "width": 40, "height": 20}
+  ]
+}"#,
+        )
+    }
+
+    #[test]
+    fn distribute_overlapping_boxes_without_gap_needs_space() {
+        let (_doc, scene) = three_boxes();
+        let err = distribute(
+            &scene,
+            &["A".to_string(), "B".to_string(), "C".to_string()],
+            Direction::Horizontal,
+            None,
+        )
+        .expect_err("overlapping boxes have no free gap");
+        assert_eq!(
+            err.to_string(),
+            "not enough space to distribute; pass --gap"
+        );
     }
 
     #[test]
