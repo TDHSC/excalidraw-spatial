@@ -2,6 +2,8 @@ pub mod alignment;
 pub mod connectors;
 pub mod overlap;
 
+use crate::scene_graph::Scene;
+
 pub const MIN_GAP: i32 = 40;
 pub const NEAR_DIST: i32 = 12;
 pub const ZONE_CHILD_AREA_RATIO: f64 = 0.25;
@@ -45,7 +47,41 @@ pub struct LintIssue {
     pub command: Option<String>,
 }
 
-// run_lint arrives with the lint tickets.
+const RULE_ORDER: &[&str] = &[
+    "OVERLAP_COMPONENT",
+    "CONTAINER_OVERFLOW",
+    "ARROW_CROSSING_NODE",
+    "ARROW_LABEL_COLLISION",
+    "TEXT_OVERFLOW",
+    "DANGLING_ARROW",
+    "NEAR_MISS_ALIGNMENT",
+    "UNEVEN_SPACING",
+    "UNBOUND_TEXT",
+];
+
+fn rule_order(rule: &str) -> usize {
+    RULE_ORDER
+        .iter()
+        .position(|&r| r == rule)
+        .unwrap_or(usize::MAX)
+}
+
+pub fn sort_issues(issues: &mut [LintIssue]) {
+    issues.sort_by(|a, b| {
+        a.severity
+            .cmp(&b.severity)
+            .then_with(|| rule_order(a.rule).cmp(&rule_order(b.rule)))
+            .then_with(|| a.targets.cmp(&b.targets))
+    });
+}
+
+pub fn run_lint(scene: &Scene, file: &str) -> Vec<LintIssue> {
+    let mut issues = overlap::overlap_component(scene, file);
+    issues.extend(overlap::container_overflow(scene, file));
+    issues.extend(scene.notes.iter().cloned());
+    sort_issues(&mut issues);
+    issues
+}
 
 pub fn label_str(text: &str) -> String {
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -61,5 +97,42 @@ pub fn disp(id: &str, label: Option<&str>) -> String {
     match label.map(label_str) {
         Some(s) if !s.is_empty() => format!("{id} \"{s}\""),
         _ => id.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn issue(rule: &'static str, severity: Severity, targets: &[&str]) -> LintIssue {
+        LintIssue {
+            rule,
+            severity,
+            targets: targets.iter().map(|s| (*s).to_string()).collect(),
+            message: String::new(),
+            fix: None,
+            command: None,
+        }
+    }
+
+    #[test]
+    fn sort_issues_orders_by_severity_then_rule() {
+        let mut issues = vec![
+            issue("OVERLAP_COMPONENT", Severity::Info, &["z"]),
+            issue("UNBOUND_TEXT", Severity::Error, &["a"]),
+            issue("CONTAINER_OVERFLOW", Severity::Warn, &["m"]),
+        ];
+        sort_issues(&mut issues);
+        assert_eq!(
+            issues
+                .iter()
+                .map(|i| (i.severity, i.rule))
+                .collect::<Vec<_>>(),
+            vec![
+                (Severity::Error, "UNBOUND_TEXT"),
+                (Severity::Warn, "CONTAINER_OVERFLOW"),
+                (Severity::Info, "OVERLAP_COMPONENT"),
+            ]
+        );
     }
 }
