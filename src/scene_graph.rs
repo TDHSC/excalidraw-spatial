@@ -435,8 +435,69 @@ impl Scene {
             .collect()
     }
 
-    pub fn resolve(&self, _query: &str) -> anyhow::Result<Target> {
-        anyhow::bail!("not implemented")
+    pub fn resolve(&self, query: &str) -> anyhow::Result<Target> {
+        if let Some(component) = self.component(query) {
+            return Ok(Target::Component(component.id.clone()));
+        }
+        if let Some(container) = self.container(query) {
+            return Ok(Target::Container(container.id.clone()));
+        }
+        if let Some(connector) = self.connector(query) {
+            return Ok(Target::Connector(connector.id.clone()));
+        }
+
+        if let Some(component) = self
+            .components
+            .iter()
+            .find(|component| component.elements.iter().any(|id| id == query))
+        {
+            return Ok(Target::Component(component.id.clone()));
+        }
+        if let Some(container) = self
+            .containers
+            .iter()
+            .find(|container| container.elements.iter().any(|id| id == query))
+        {
+            return Ok(Target::Container(container.id.clone()));
+        }
+
+        let needle = query.trim();
+        let mut label_matches: Vec<(usize, Target)> = Vec::new();
+        for component in &self.components {
+            if component
+                .label
+                .as_deref()
+                .is_some_and(|label| label.trim() == needle)
+            {
+                label_matches.push((component.z, Target::Component(component.id.clone())));
+            }
+        }
+        for container in &self.containers {
+            if container
+                .name
+                .as_deref()
+                .is_some_and(|name| name.trim() == needle)
+            {
+                label_matches.push((container.z, Target::Container(container.id.clone())));
+            }
+        }
+        label_matches.sort_by_key(|(z, _)| *z);
+        match label_matches.len() {
+            0 => anyhow::bail!("unknown id \"{query}\""),
+            1 => Ok(label_matches.pop().expect("one match").1),
+            _ => {
+                let ids = label_matches
+                    .iter()
+                    .map(|(_, target)| match target {
+                        Target::Component(id) | Target::Container(id) | Target::Connector(id) => {
+                            id.as_str()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::bail!("ambiguous id \"{query}\": matches {ids}")
+            }
+        }
     }
 }
 
@@ -752,5 +813,118 @@ fn attach_end(
             distance,
         },
         _ => Attach::Free,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::Document;
+
+    fn load(name: &str) -> Scene {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(format!("{name}.excalidraw"));
+        let src = std::fs::read_to_string(path).expect("fixture");
+        Scene::build(&Document::parse(&src).expect("parse fixture"))
+    }
+
+    fn parse_scene(src: &str) -> Scene {
+        Scene::build(&Document::parse(src).expect("parse constructed document"))
+    }
+
+    #[test]
+    fn overlap_resolves_component_id_label_element_and_label() {
+        let scene = load("overlap");
+        assert_eq!(
+            scene.resolve("auth").unwrap(),
+            Target::Component("auth".to_string())
+        );
+        assert_eq!(
+            scene.resolve("auth-label").unwrap(),
+            Target::Component("auth".to_string())
+        );
+        assert_eq!(
+            scene.resolve("Auth").unwrap(),
+            Target::Component("auth".to_string())
+        );
+    }
+
+    #[test]
+    fn icon_group_resolves_member_label_frame_name_and_connector() {
+        let scene = load("icon_group");
+        assert_eq!(
+            scene.resolve("Hn6Bf3Jq8XcV1sMz5LwPe").unwrap(),
+            Target::Component("group:kq3Xv9TzL2mPw8RbN5cYd".to_string())
+        );
+        assert_eq!(
+            scene.resolve("Postgres").unwrap(),
+            Target::Component("group:kq3Xv9TzL2mPw8RbN5cYd".to_string())
+        );
+        assert_eq!(
+            scene.resolve("Storage").unwrap(),
+            Target::Container("Fr8Mw2Nq5Xs1Lp4Kv7RbZ".to_string())
+        );
+        assert_eq!(
+            scene.resolve("Lg7Hs4Kd1Fp8Wq5Er2TyU").unwrap(),
+            Target::Connector("Lg7Hs4Kd1Fp8Wq5Er2TyU".to_string())
+        );
+    }
+
+    #[test]
+    fn unknown_query_names_the_query() {
+        let scene = load("overlap");
+        let err = scene.resolve("nope").unwrap_err().to_string();
+        assert_eq!(err, "unknown id \"nope\"");
+    }
+
+    #[test]
+    fn duplicate_labels_are_ambiguous_in_z_order() {
+        // Two rectangles, both labeled "API". The lower-z box is listed first.
+        let scene = parse_scene(
+            r#"{
+                "elements": [
+                    {
+                        "id": "box-low",
+                        "type": "rectangle",
+                        "x": 0,
+                        "y": 0,
+                        "width": 80,
+                        "height": 40
+                    },
+                    {
+                        "id": "label-low",
+                        "type": "text",
+                        "x": 10,
+                        "y": 10,
+                        "width": 30,
+                        "height": 20,
+                        "text": "API",
+                        "containerId": "box-low"
+                    },
+                    {
+                        "id": "box-high",
+                        "type": "rectangle",
+                        "x": 200,
+                        "y": 0,
+                        "width": 80,
+                        "height": 40
+                    },
+                    {
+                        "id": "label-high",
+                        "type": "text",
+                        "x": 210,
+                        "y": 10,
+                        "width": 30,
+                        "height": 20,
+                        "text": "API",
+                        "containerId": "box-high"
+                    }
+                ]
+            }"#,
+        );
+        let err = scene.resolve("API").unwrap_err().to_string();
+        assert!(err.starts_with("ambiguous id \"API\": matches"), "{err}");
+        assert_eq!(err, "ambiguous id \"API\": matches box-low, box-high");
     }
 }
