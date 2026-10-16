@@ -1,5 +1,6 @@
-use crate::geometry::Rect;
-use crate::scene_graph::{Scene, Target};
+use crate::geometry::{ceil_px, Rect};
+use crate::linter::{TEXT_PAD_X, TEXT_PAD_Y, TEXT_SHAPES};
+use crate::scene_graph::{Component, ComponentKind, ContainerKind, Scene, Target};
 use crate::{Axis, Direction, PlaceAlign};
 
 use super::Change;
@@ -208,18 +209,97 @@ fn resolve_box(scene: &Scene, id: &str) -> anyhow::Result<(String, Rect)> {
     Ok(resolved.into_iter().next().expect("one id"))
 }
 
-pub fn fit_container(_scene: &Scene, _id: &str, _padding: Option<f64>) -> anyhow::Result<Change> {
-    anyhow::bail!("not implemented")
+pub fn fit_container(scene: &Scene, id: &str, padding: Option<f64>) -> anyhow::Result<Change> {
+    let Target::Container(container_id) = scene.resolve(id)? else {
+        anyhow::bail!("{id} is not a container");
+    };
+    let container = scene
+        .container(&container_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown id \"{container_id}\""))?;
+    let padding = padding.unwrap_or(40.0);
+    let kids = crate::spatial::children(scene, &container_id);
+    let mut iter = kids.into_iter();
+    let Some((_, first)) = iter.next() else {
+        anyhow::bail!("container {container_id} has no children");
+    };
+    let union = iter.fold(first, |acc, (_, rect)| acc.union(&rect));
+    let mut new_rect = union.inflate(padding);
+    if container.kind == ContainerKind::Zone && container.title_element.is_some() {
+        new_rect.y1 -= container.title_height.unwrap_or(0.0) + 10.0;
+    }
+    Ok(Change {
+        moves: vec![],
+        resizes: vec![(container_id, new_rect)],
+    })
 }
 
 pub fn fit_text(
-    _scene: &Scene,
-    _id: Option<&str>,
-    _all: bool,
-    _padding_x: Option<f64>,
-    _padding_y: Option<f64>,
+    scene: &Scene,
+    id: Option<&str>,
+    all: bool,
+    padding_x: Option<f64>,
+    padding_y: Option<f64>,
 ) -> anyhow::Result<Change> {
-    anyhow::bail!("not implemented")
+    let px = padding_x.unwrap_or(24.0);
+    let py = padding_y.unwrap_or(16.0);
+    let targets: Vec<&Component> = if let Some(id) = id {
+        let Target::Component(component_id) = scene.resolve(id)? else {
+            anyhow::bail!("{id} is not a text shape");
+        };
+        let component = scene
+            .component(&component_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown id \"{component_id}\""))?;
+        if !is_fit_text_eligible(component) {
+            anyhow::bail!("{component_id} is not a text shape");
+        }
+        vec![component]
+    } else if all {
+        scene
+            .components
+            .iter()
+            .filter(|component| is_fit_text_eligible(component))
+            .collect()
+    } else {
+        anyhow::bail!("fit-text needs --id or --all");
+    };
+
+    let mut resizes = Vec::new();
+    for component in targets {
+        let Some(t) = component.label_size.as_ref() else {
+            continue;
+        };
+        let f = text_factor(&component.type_name);
+        let w = component.rect.width();
+        let h = component.rect.height();
+        if t.width <= w * f - f64::from(TEXT_PAD_X) && t.height <= h * f - f64::from(TEXT_PAD_Y) {
+            continue;
+        }
+        let new_w = w.max(ceil_px((t.width + 2.0 * px) / f));
+        let new_h = h.max(ceil_px((t.height + 2.0 * py) / f));
+        let center = component.rect.center();
+        let new_rect =
+            Rect::from_xywh(center.x - new_w / 2.0, center.y - new_h / 2.0, new_w, new_h);
+        resizes.push((component.id.clone(), new_rect));
+    }
+    Ok(Change {
+        moves: vec![],
+        resizes,
+    })
+}
+
+fn is_fit_text_eligible(component: &Component) -> bool {
+    component.kind == ComponentKind::Shape
+        && TEXT_SHAPES.contains(&component.type_name.as_str())
+        && component.label_element.is_some()
+        && component.label_size.is_some()
+}
+
+fn text_factor(type_name: &str) -> f64 {
+    match type_name {
+        "ellipse" => 0.707,
+        "diamond" => 0.5,
+        _ => 1.0,
+    }
 }
 
 #[cfg(test)]

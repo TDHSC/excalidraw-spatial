@@ -47,6 +47,25 @@ fn approx(a: f64, b: f64) {
 }
 
 fn lint_json(doc_json: &str) -> serde_json::Value {
+    let output = run_lint_json(doc_json);
+    assert_eq!(
+        output.status.code().expect("lint code"),
+        0,
+        "lint stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_json(&String::from_utf8(output.stdout).expect("lint stdout utf-8"))
+}
+
+fn lint_issues(doc_json: &str) -> Vec<serde_json::Value> {
+    let output = run_lint_json(doc_json);
+    parse_json(&String::from_utf8(output.stdout).expect("lint stdout utf-8"))["issues"]
+        .as_array()
+        .expect("issues")
+        .clone()
+}
+
+fn run_lint_json(doc_json: &str) -> std::process::Output {
     let mut child = Command::new(bin())
         .args(["lint", "-", "--format", "json"])
         .stdin(Stdio::piped())
@@ -60,14 +79,7 @@ fn lint_json(doc_json: &str) -> serde_json::Value {
         .expect("lint stdin")
         .write_all(doc_json.as_bytes())
         .expect("write lint stdin");
-    let output = child.wait_with_output().expect("lint");
-    assert_eq!(
-        output.status.code().expect("lint code"),
-        0,
-        "lint stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    parse_json(&String::from_utf8(output.stdout).expect("lint stdout utf-8"))
+    child.wait_with_output().expect("lint")
 }
 
 #[test]
@@ -249,4 +261,136 @@ fn place_auth_right_of_api_uses_default_gap_and_center() {
         0,
         "lint={lint}"
     );
+}
+
+#[test]
+fn fit_container_swimlanes_lane_be_grows_around_children_and_title() {
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "fit-container",
+        &fixture("swimlanes"),
+        "--id",
+        "lane_be",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let out = parse_json(&stdout);
+
+    let lane_be = element(&out, "lane_be");
+    approx(num(lane_be, "x"), 440.0);
+    approx(num(lane_be, "y"), 35.0);
+    approx(num(lane_be, "width"), 460.0);
+    approx(num(lane_be, "height"), 195.0);
+
+    approx(num(element(&out, "lane_be_title"), "x"), 456.0);
+    approx(num(element(&out, "lane_be_title"), "y"), 47.0);
+
+    let lint = lint_json(&stdout);
+    assert_eq!(
+        lint["issues"].as_array().expect("issues").len(),
+        0,
+        "lint={lint}"
+    );
+}
+
+#[test]
+fn fit_container_icon_group_storage_uses_padding_without_title_inset() {
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "fit-container",
+        &fixture("icon_group"),
+        "--id",
+        "Storage",
+        "--padding",
+        "20",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let out = parse_json(&stdout);
+
+    let frame = element(&out, "Fr8Mw2Nq5Xs1Lp4Kv7RbZ");
+    approx(num(frame, "x"), 38.4);
+    approx(num(frame, "y"), 60.0);
+    approx(num(frame, "width"), 441.6);
+    approx(num(frame, "height"), 200.0);
+
+    let lint = lint_json(&stdout);
+    assert_eq!(
+        lint["issues"].as_array().expect("issues").len(),
+        0,
+        "lint={lint}"
+    );
+}
+
+#[test]
+fn fit_text_text_layout_n3_grows_width_and_keeps_center() {
+    let (code, stdout, stderr) =
+        run_layout(&["layout", "fit-text", &fixture("text_layout"), "--id", "n3"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let out = parse_json(&stdout);
+
+    let n3 = element(&out, "n3");
+    approx(num(n3, "x"), 322.0);
+    approx(num(n3, "y"), 100.0);
+    approx(num(n3, "width"), 256.0);
+    approx(num(n3, "height"), 80.0);
+    approx(num(element(&out, "n3-label"), "x"), 346.0);
+
+    let issues = lint_issues(&stdout);
+    assert!(
+        issues.iter().all(|issue| issue["rule"] != "TEXT_OVERFLOW"),
+        "still has TEXT_OVERFLOW: {issues:?}"
+    );
+}
+
+#[test]
+fn fit_text_text_layout_all_only_changes_overflowing_n3() {
+    let original = std::fs::read_to_string(fixture("text_layout")).expect("read fixture");
+    let (code, stdout, stderr) =
+        run_layout(&["layout", "fit-text", &fixture("text_layout"), "--all"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let input = parse_json(&original);
+    let out = parse_json(&stdout);
+    let input_els = input["elements"].as_array().expect("input elements");
+    let out_els = out["elements"].as_array().expect("output elements");
+    assert_eq!(out_els.len(), input_els.len());
+    for (before, after) in input_els.iter().zip(out_els) {
+        let id = before["id"].as_str().expect("id");
+        if id == "n3" || id == "n3-label" {
+            continue;
+        }
+        assert_eq!(after, before, "element {id} changed");
+    }
+}
+
+#[test]
+fn fit_text_text_layout_n1_already_fits() {
+    let original = std::fs::read_to_string(fixture("text_layout")).expect("read fixture");
+    let (code, stdout, stderr) =
+        run_layout(&["layout", "fit-text", &fixture("text_layout"), "--id", "n1"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert_eq!(stdout, original);
+    assert_eq!(stderr, "excal: nothing to change\n");
+}
+
+#[test]
+fn fit_text_icon_group_postgres_group_exits_2() {
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "fit-text",
+        &fixture("icon_group"),
+        "--id",
+        "Postgres",
+    ]);
+    assert_eq!(code, 2, "stdout={stdout} stderr={stderr}");
+}
+
+#[test]
+fn fit_container_basic_flow_api_is_not_a_container() {
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "fit-container",
+        &fixture("basic_flow"),
+        "--id",
+        "api",
+    ]);
+    assert_eq!(code, 2, "stdout={stdout} stderr={stderr}");
 }

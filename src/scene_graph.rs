@@ -48,6 +48,10 @@ pub struct Container {
     pub rect: Rect,
     pub name: Option<String>,
     pub title_element: Option<String>,
+    /// `text_size` height of `title_element`, captured at build so
+    /// `fit_container` can run without the document.
+    #[serde(skip)]
+    pub title_height: Option<f64>,
     pub elements: Vec<String>,
     pub parent: Option<String>,
     pub frame_id: Option<String>,
@@ -178,12 +182,19 @@ impl Scene {
             if let Some(label) = &label {
                 member_ids.push(label.element_id.clone());
             }
+            let title_height = label.as_ref().and_then(|label| {
+                elements
+                    .iter()
+                    .find(|el| el.id == label.element_id)
+                    .map(|el| text_size(el).height)
+            });
             containers.push(Container {
                 id: candidate.id.to_string(),
                 kind: ContainerKind::Zone,
                 rect: candidate.rect,
                 name: label.as_ref().map(|label| label.text.clone()),
-                title_element: label.map(|label| label.element_id),
+                title_element: label.as_ref().map(|label| label.element_id.clone()),
+                title_height,
                 elements: member_ids,
                 parent: None,
                 frame_id: candidate.frame_id.clone(),
@@ -361,6 +372,7 @@ impl Scene {
                 rect: el.rect(),
                 name: Some(name),
                 title_element: None,
+                title_height: None,
                 elements: vec![el.id.clone()],
                 parent: None,
                 frame_id: non_empty(el.frame_id.as_deref()),
@@ -663,6 +675,7 @@ fn assign_zone_titles(
         let zone = &mut containers[index];
         zone.name = Some(title_text);
         zone.title_element = Some(title_id.clone());
+        zone.title_height = Some(text_size(title).height);
         zone.elements.push(title_id.clone());
         claimed.insert(title_id);
     }
