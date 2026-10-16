@@ -41,6 +41,37 @@ fn lint_text_layout_matches_golden_and_exits_0() {
 }
 
 #[test]
+fn lint_arrows_matches_golden_and_exits_1() {
+    let (code, stdout, _stderr) = run(&["lint", "tests/fixtures/arrows.excalidraw"]);
+    assert_eq!(code, 1);
+    assert_eq!(stdout, include_str!("expected/arrows.lint.txt"));
+}
+
+#[test]
+fn lint_icon_group_matches_golden_and_exits_0() {
+    let (code, stdout, _stderr) = run(&["lint", "tests/fixtures/icon_group.excalidraw"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, include_str!("expected/icon_group.lint.txt"));
+}
+
+#[test]
+fn lint_all_fixtures_match_golden() {
+    for (name, code) in [
+        ("arrows", 1),
+        ("basic_flow", 0),
+        ("icon_group", 0),
+        ("overlap", 1),
+        ("swimlanes", 1),
+        ("text_layout", 0),
+    ] {
+        let (got, stdout, _) = run(&["lint", &format!("tests/fixtures/{name}.excalidraw")]);
+        let expected = std::fs::read_to_string(format!("tests/expected/{name}.lint.txt")).unwrap();
+        assert_eq!(got, code, "{name}");
+        assert_eq!(stdout, expected, "{name}");
+    }
+}
+
+#[test]
 fn lint_text_layout_strict_exits_1_with_same_stdout() {
     let (code, stdout, _stderr) =
         run(&["lint", "tests/fixtures/text_layout.excalidraw", "--strict"]);

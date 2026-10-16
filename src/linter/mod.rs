@@ -78,6 +78,9 @@ pub fn sort_issues(issues: &mut [LintIssue]) {
 pub fn run_lint(scene: &Scene, file: &str) -> Vec<LintIssue> {
     let mut issues = overlap::overlap_component(scene, file);
     issues.extend(overlap::container_overflow(scene, file));
+    issues.extend(connectors::arrow_crossing_node(scene));
+    issues.extend(connectors::arrow_label_collision(scene, file));
+    issues.extend(connectors::dangling_arrow(scene));
     issues.extend(alignment::text_overflow(scene, file));
     issues.extend(alignment::near_miss_alignment(scene, file));
     issues.extend(alignment::uneven_spacing(scene, file));
