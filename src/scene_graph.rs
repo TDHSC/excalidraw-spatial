@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::geometry::{Point, Rect};
-use crate::linter::{label_str, LintIssue, Severity, SHAPE_TYPES, ZONE_CHILD_AREA_RATIO};
+use crate::linter::{
+    label_str, LintIssue, Severity, SHAPE_TYPES, ZONE_CHILD_AREA_RATIO, ZONE_TITLE_BAND,
+};
 use crate::schema::{Document, RawElement};
 
 const NEAR_DIST: f64 = 12.0;
@@ -160,6 +162,31 @@ impl Scene {
             atomic_groups.push((group_id, members));
         }
 
+        let candidates = candidate_nodes(&elements, &atomic_groups, &atomic_member_ids);
+        let zone_ids = zone_rectangle_ids(&candidates);
+        let mut containers = Vec::new();
+        for candidate in &candidates {
+            if !zone_ids.contains(candidate.id) {
+                continue;
+            }
+            let label = shape_labels.remove(candidate.id);
+            let mut member_ids = vec![candidate.id.to_string()];
+            if let Some(label) = &label {
+                member_ids.push(label.element_id.clone());
+            }
+            containers.push(Container {
+                id: candidate.id.to_string(),
+                kind: ContainerKind::Zone,
+                rect: candidate.rect,
+                name: label.as_ref().map(|label| label.text.clone()),
+                title_element: label.map(|label| label.element_id),
+                elements: member_ids,
+                parent: None,
+                frame_id: candidate.frame_id.clone(),
+                z: candidate.z,
+            });
+        }
+
         let mut components = Vec::new();
         for (group_id, members) in atomic_groups {
             let mut member_ids: Vec<String> =
@@ -212,7 +239,7 @@ impl Scene {
             if !SHAPE_TYPES.contains(&el.element_type.as_str()) {
                 continue;
             }
-            if atomic_member_ids.contains(&el.id) {
+            if atomic_member_ids.contains(&el.id) || zone_ids.contains(el.id.as_str()) {
                 continue;
             }
             let label = shape_labels.remove(&el.id);
@@ -233,6 +260,8 @@ impl Scene {
                 z: el.z,
             });
         }
+
+        assign_zone_titles(&mut containers, &components, &elements, &mut claimed);
 
         let mut notes = Vec::new();
         for el in &elements {
@@ -307,7 +336,26 @@ impl Scene {
         }
         components.sort_by_key(|component| component.z);
 
-        let containers = Vec::new();
+        for el in &elements {
+            if el.element_type != "frame" && el.element_type != "magicframe" {
+                continue;
+            }
+            let name = non_empty(el.name.as_deref()).unwrap_or_else(|| "Frame".to_string());
+            containers.push(Container {
+                id: el.id.clone(),
+                kind: ContainerKind::Frame,
+                rect: el.rect(),
+                name: Some(name),
+                title_element: None,
+                elements: vec![el.id.clone()],
+                parent: None,
+                frame_id: non_empty(el.frame_id.as_deref()),
+                z: el.z,
+            });
+        }
+        containers.sort_by_key(|container| container.z);
+        assign_parents(&mut components, &mut containers);
+
         let element_owner = owner_index(&components, &containers);
         let nodes: Vec<&Component> = components
             .iter()
@@ -413,6 +461,228 @@ fn is_connector_type(element_type: &str) -> bool {
 
 fn non_empty(value: Option<&str>) -> Option<String> {
     value.filter(|value| !value.is_empty()).map(str::to_string)
+}
+
+struct Candidate<'a> {
+    id: &'a str,
+    rect: Rect,
+    z: usize,
+    frame_id: Option<String>,
+    is_ungrouped_rectangle: bool,
+}
+
+fn candidate_nodes<'a>(
+    elements: &[&'a RawElement],
+    atomic_groups: &[(&'a str, Vec<&'a RawElement>)],
+    atomic_member_ids: &HashSet<String>,
+) -> Vec<Candidate<'a>> {
+    let mut candidates = Vec::new();
+    for el in elements {
+        if !SHAPE_TYPES.contains(&el.element_type.as_str()) || atomic_member_ids.contains(&el.id) {
+            continue;
+        }
+        candidates.push(Candidate {
+            id: el.id.as_str(),
+            rect: el.rect(),
+            z: el.z,
+            frame_id: non_empty(el.frame_id.as_deref()),
+            is_ungrouped_rectangle: el.element_type == "rectangle",
+        });
+    }
+    for (group_id, members) in atomic_groups {
+        let mut rect = members[0].rect();
+        let mut z = members[0].z;
+        let mut frame_id = None;
+        for member in members {
+            rect = rect.union(&member.rect());
+            z = z.min(member.z);
+            if frame_id.is_none() {
+                frame_id = non_empty(member.frame_id.as_deref());
+            }
+        }
+        candidates.push(Candidate {
+            id: group_id,
+            rect,
+            z,
+            frame_id,
+            is_ungrouped_rectangle: false,
+        });
+    }
+    candidates
+}
+
+fn zone_rectangle_ids<'a>(candidates: &[Candidate<'a>]) -> HashSet<&'a str> {
+    let mut zones = HashSet::new();
+    for rectangle in candidates
+        .iter()
+        .filter(|candidate| candidate.is_ungrouped_rectangle)
+    {
+        let child_limit = ZONE_CHILD_AREA_RATIO * rectangle.rect.area();
+        let nested = candidates
+            .iter()
+            .filter(|other| other.id != rectangle.id)
+            .filter(|other| other.z > rectangle.z)
+            .filter(|other| rectangle.rect.contains_point(other.rect.center()))
+            .filter(|other| other.rect.area() <= child_limit)
+            .count();
+        if nested >= 2 {
+            zones.insert(rectangle.id);
+        }
+    }
+    zones
+}
+
+fn assign_zone_titles(
+    containers: &mut [Container],
+    components: &[Component],
+    elements: &[&RawElement],
+    claimed: &mut HashSet<String>,
+) {
+    let nodes: Vec<&Component> = components
+        .iter()
+        .filter(|component| component.kind != ComponentKind::Text)
+        .collect();
+    let mut order: Vec<usize> = containers
+        .iter()
+        .enumerate()
+        .filter(|(_, container)| container.kind == ContainerKind::Zone && container.name.is_none())
+        .map(|(index, _)| index)
+        .collect();
+    order.sort_by(|&left, &right| {
+        containers[left]
+            .rect
+            .area()
+            .partial_cmp(&containers[right].rect.area())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.cmp(&right))
+    });
+
+    let band = f64::from(ZONE_TITLE_BAND);
+    for index in order {
+        let zone = &containers[index];
+        let mut best: Option<&RawElement> = None;
+        for el in elements {
+            if el.element_type != "text" || claimed.contains(&el.id) {
+                continue;
+            }
+            let rect = el.rect();
+            let center = rect.center();
+            if !zone.rect.contains_point(center) || center.y > zone.rect.y1 + band {
+                continue;
+            }
+            if nodes.iter().any(|node| node.rect.contains_point(center)) {
+                continue;
+            }
+            best = Some(match best {
+                Some(current) if (rect.y1, rect.x1) >= (current.rect().y1, current.rect().x1) => {
+                    current
+                }
+                _ => el,
+            });
+        }
+        let Some(title) = best else {
+            continue;
+        };
+        let title_id = title.id.clone();
+        let title_text = title.text.clone().unwrap_or_default();
+        let zone = &mut containers[index];
+        zone.name = Some(title_text);
+        zone.title_element = Some(title_id.clone());
+        zone.elements.push(title_id.clone());
+        claimed.insert(title_id);
+    }
+}
+
+fn assign_parents(components: &mut [Component], containers: &mut [Container]) {
+    let frames: Vec<(String, Rect, usize)> = containers
+        .iter()
+        .filter(|container| container.kind == ContainerKind::Frame)
+        .map(|container| (container.id.clone(), container.rect, container.z))
+        .collect();
+    let zones: Vec<(String, Rect, usize)> = containers
+        .iter()
+        .filter(|container| container.kind == ContainerKind::Zone)
+        .map(|container| (container.id.clone(), container.rect, container.z))
+        .collect();
+
+    for component in components.iter_mut() {
+        component.parent = smallest_parent(parent_candidates(
+            component.frame_id.as_deref(),
+            component.rect,
+            component.z,
+            None,
+            &frames,
+            &zones,
+        ));
+    }
+    // Indexing keeps the zone snapshot and the parent write on the same slot.
+    #[allow(clippy::needless_range_loop)]
+    for index in 0..containers.len() {
+        if containers[index].kind != ContainerKind::Zone {
+            continue;
+        }
+        let (frame_id, rect, z, id) = {
+            let zone = &containers[index];
+            (zone.frame_id.clone(), zone.rect, zone.z, zone.id.clone())
+        };
+        containers[index].parent = smallest_parent(parent_candidates(
+            frame_id.as_deref(),
+            rect,
+            z,
+            Some(id.as_str()),
+            &frames,
+            &zones,
+        ));
+    }
+}
+
+fn parent_candidates(
+    child_frame_id: Option<&str>,
+    rect: Rect,
+    z: usize,
+    exclude_zone: Option<&str>,
+    frames: &[(String, Rect, usize)],
+    zones: &[(String, Rect, usize)],
+) -> Vec<(String, f64, usize)> {
+    let mut candidates = Vec::new();
+    // A frame parents a child only when the child names that frame. Two missing
+    // frame ids are not a match.
+    if let Some(frame_id) = child_frame_id {
+        for (id, frame_rect, frame_z) in frames {
+            if id == frame_id {
+                candidates.push((id.clone(), frame_rect.area(), *frame_z));
+            }
+        }
+    }
+    let child_area = if exclude_zone.is_some() {
+        Some(rect.area())
+    } else {
+        None
+    };
+    let center = rect.center();
+    for (id, zone_rect, zone_z) in zones {
+        if exclude_zone == Some(id.as_str()) || *zone_z >= z {
+            continue;
+        }
+        if !zone_rect.contains_point(center) {
+            continue;
+        }
+        if child_area.is_some_and(|area| zone_rect.area() <= area) {
+            continue;
+        }
+        candidates.push((id.clone(), zone_rect.area(), *zone_z));
+    }
+    candidates
+}
+
+fn smallest_parent(mut candidates: Vec<(String, f64, usize)>) -> Option<String> {
+    candidates.sort_by(|left, right| {
+        left.1
+            .partial_cmp(&right.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.2.cmp(&right.2))
+    });
+    candidates.into_iter().next().map(|(id, _, _)| id)
 }
 
 fn group_should_dissolve(members: &[&RawElement]) -> bool {
