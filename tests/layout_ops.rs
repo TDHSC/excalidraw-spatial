@@ -494,3 +494,149 @@ fn move_arrow_endpoint_writes_estimated_label_size() {
     approx(num(lbl, "width"), 144.0);
     approx(num(lbl, "height"), 20.0);
 }
+
+#[test]
+fn fit_text_all_reclips_orbit_arrow_after_resize() {
+    let path = temp_path("b01-fit-text.excalidraw");
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {
+      "type": "rectangle",
+      "id": "s1",
+      "x": 100,
+      "y": 100,
+      "width": 100,
+      "height": 80,
+      "boundElements": [
+        {"type": "text", "id": "s1-label"},
+        {"type": "arrow", "id": "arr"}
+      ]
+    },
+    {
+      "type": "text",
+      "id": "s1-label",
+      "x": 60,
+      "y": 127.5,
+      "width": 180,
+      "height": 25,
+      "text": "Payment Gateway",
+      "fontSize": 20,
+      "textAlign": "center",
+      "containerId": "s1"
+    },
+    {
+      "type": "rectangle",
+      "id": "s2",
+      "x": 400,
+      "y": 100,
+      "width": 100,
+      "height": 80,
+      "boundElements": [
+        {"type": "text", "id": "s2-label"},
+        {"type": "arrow", "id": "arr"}
+      ]
+    },
+    {
+      "type": "text",
+      "id": "s2-label",
+      "x": 360,
+      "y": 127.5,
+      "width": 180,
+      "height": 25,
+      "text": "Payment Gateway",
+      "fontSize": 20,
+      "textAlign": "center",
+      "containerId": "s2"
+    },
+    {
+      "type": "arrow",
+      "id": "arr",
+      "x": 206,
+      "y": 140,
+      "width": 188,
+      "height": 0,
+      "points": [[0, 0], [188, 0]],
+      "startBinding": {"elementId": "s1", "mode": "orbit"},
+      "endBinding": {"elementId": "s2", "mode": "orbit"}
+    }
+  ]
+}"#;
+    fs::write(&path, src).expect("write temp b01 file");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&["layout", "fit-text", path_str, "--all"]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let out = parse_json(&stdout);
+
+    let s1 = element(&out, "s1");
+    approx(num(s1, "x"), 36.0);
+    approx(num(s1, "width"), 228.0);
+
+    let s2 = element(&out, "s2");
+    approx(num(s2, "x"), 336.0);
+    approx(num(s2, "width"), 228.0);
+
+    let arr = element(&out, "arr");
+    approx(num(arr, "x"), 270.0);
+    approx(num(arr, "y"), 140.0);
+    approx(num(arr, "width"), 60.0);
+    assert_eq!(arr["points"], serde_json::json!([[0, 0], [60, 0]]));
+}
+
+#[test]
+fn move_fetcher_toward_parser_clips_forward_at_4px_gap() {
+    let path = temp_path("b12a-move.excalidraw");
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {
+      "type": "rectangle",
+      "id": "fetcher",
+      "x": 275,
+      "y": 65,
+      "width": 175,
+      "height": 75,
+      "boundElements": [{"type": "arrow", "id": "a_fetch_parse"}]
+    },
+    {
+      "type": "rectangle",
+      "id": "parser",
+      "x": 510,
+      "y": 65,
+      "width": 175,
+      "height": 75,
+      "boundElements": [{"type": "arrow", "id": "a_fetch_parse"}]
+    },
+    {
+      "type": "arrow",
+      "id": "a_fetch_parse",
+      "x": 456,
+      "y": 102.5,
+      "width": 48,
+      "height": 0,
+      "points": [[0, 0], [48, 0]],
+      "startBinding": {"elementId": "fetcher", "mode": "orbit"},
+      "endBinding": {"elementId": "parser", "mode": "orbit"}
+    }
+  ]
+}"#;
+    fs::write(&path, src).expect("write temp b12a file");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) =
+        run_layout(&["layout", "move", path_str, "--id", "fetcher", "--dx", "56"]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let out = parse_json(&stdout);
+
+    let arr = element(&out, "a_fetch_parse");
+    approx(num(arr, "x"), 506.0);
+    approx(num(arr, "y"), 102.5);
+    approx(num(arr, "width"), 4.0);
+    assert_eq!(arr["points"], serde_json::json!([[0, 0], [4, 0]]));
+    let points = arr["points"].as_array().expect("points");
+    let end_x = points[1][0].as_f64().expect("end x");
+    assert!(end_x > 0.0, "arrow flipped backwards: {}", arr["points"]);
+}

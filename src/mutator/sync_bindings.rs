@@ -31,6 +31,21 @@ fn round_json(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
+pub(crate) fn normalized_anchor(rect: &Rect, p: Point) -> (f64, f64) {
+    let q = rect.closest_point(p);
+    let u = if rect.width() > 0.0 {
+        (q.x - rect.x1) / rect.width()
+    } else {
+        0.5
+    };
+    let v = if rect.height() > 0.0 {
+        (q.y - rect.y1) / rect.height()
+    } else {
+        0.5
+    };
+    (u, v)
+}
+
 fn focus_point(rect: &Rect, fixed: Option<[f64; 2]>) -> Point {
     match fixed {
         Some([fx, fy]) => Point {
@@ -38,6 +53,29 @@ fn focus_point(rect: &Rect, fixed: Option<[f64; 2]>) -> Point {
             y: rect.y1 + fy * rect.height(),
         },
         None => rect.center(),
+    }
+}
+
+fn project_shift(old_rect: &Rect, new_rect: &Rect, p: Point) -> Point {
+    let (u, v) = normalized_anchor(old_rect, p);
+    let q = old_rect.closest_point(p);
+    let q_new = Point {
+        x: new_rect.x1 + u * new_rect.width(),
+        y: new_rect.y1 + v * new_rect.height(),
+    };
+    Point {
+        x: q_new.x - q.x,
+        y: q_new.y - q.y,
+    }
+}
+
+fn attach_resized(attach: &Attach, resized_ids: &HashSet<String>) -> bool {
+    match attach {
+        Attach::Bound { target, element } => {
+            resized_ids.contains(target) || resized_ids.contains(element)
+        }
+        Attach::Near { target, .. } => resized_ids.contains(target),
+        Attach::Free => false,
     }
 }
 
@@ -68,6 +106,8 @@ fn endpoint_shift(
     changed: &HashMap<String, (Rect, Rect)>,
     elem_changed: &HashMap<String, (Rect, Rect)>,
     fixed_point: Option<[f64; 2]>,
+    resized_ids: &HashSet<String>,
+    p: Point,
 ) -> Option<Point> {
     match attach {
         Attach::Free => None,
@@ -80,6 +120,10 @@ fn endpoint_shift(
             } else {
                 *changed.get(target)?
             };
+            let resized = resized_ids.contains(target) || resized_ids.contains(element);
+            if resized && fixed_point.is_none() {
+                return Some(project_shift(&old_rect, &new_rect, p));
+            }
             let old_focus = focus_point(&old_rect, fixed_point);
             let new_focus = focus_point(&new_rect, fixed_point);
             Some(Point {
@@ -89,6 +133,9 @@ fn endpoint_shift(
         }
         Attach::Near { target, .. } => {
             let (old_rect, new_rect) = changed.get(target)?;
+            if resized_ids.contains(target) {
+                return Some(project_shift(old_rect, new_rect, p));
+            }
             Some(Point {
                 x: new_rect.x1 - old_rect.x1,
                 y: new_rect.y1 - old_rect.y1,
@@ -204,6 +251,7 @@ pub(crate) fn sync_arrows(
     changed: &HashMap<String, (Rect, Rect)>,
     elem_changed: &mut HashMap<String, (Rect, Rect)>,
     skip: &HashSet<String>,
+    resized_ids: &HashSet<String>,
 ) -> usize {
     let mut updated = 0;
     let connectors = old_scene.connectors.clone();
@@ -219,13 +267,32 @@ pub(crate) fn sync_arrows(
             ),
             None => continue,
         };
-        let start_shift = endpoint_shift(&conn.start, changed, elem_changed, start_fp);
-        let end_shift = endpoint_shift(&conn.end, changed, elem_changed, end_fp);
+        let start_p = conn
+            .points
+            .first()
+            .copied()
+            .unwrap_or(Point { x: 0.0, y: 0.0 });
+        let end_p = conn.points.last().copied().unwrap_or(start_p);
+        let start_shift = endpoint_shift(
+            &conn.start,
+            changed,
+            elem_changed,
+            start_fp,
+            resized_ids,
+            start_p,
+        );
+        let end_shift =
+            endpoint_shift(&conn.end, changed, elem_changed, end_fp, resized_ids, end_p);
         if start_shift.is_none() && end_shift.is_none() {
             continue;
         }
         let same = match (start_shift, end_shift) {
-            (Some(s), Some(e)) => (s.x - e.x).abs() < 1e-9 && (s.y - e.y).abs() < 1e-9,
+            (Some(s), Some(e)) => {
+                (s.x - e.x).abs() < 1e-9
+                    && (s.y - e.y).abs() < 1e-9
+                    && !attach_resized(&conn.start, resized_ids)
+                    && !attach_resized(&conn.end, resized_ids)
+            }
             _ => false,
         };
 
@@ -252,6 +319,19 @@ pub(crate) fn sync_arrows(
                             lerp(gs.focus, ge.focus, ce.0),
                         ];
                         used = true;
+                    }
+                }
+                if !used {
+                    let cs0 = clip_segment(gs.focus, ge.focus, &gs.rect);
+                    let ce0 = clip_segment(gs.focus, ge.focus, &ge.rect);
+                    if let (Some(cs0), Some(ce0)) = (cs0, ce0) {
+                        if cs0.1 < ce0.0 {
+                            abs = vec![
+                                lerp(gs.focus, ge.focus, cs0.1),
+                                lerp(gs.focus, ge.focus, ce0.0),
+                            ];
+                            used = true;
+                        }
                     }
                 }
             }

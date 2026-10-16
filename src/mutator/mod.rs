@@ -76,6 +76,7 @@ pub fn apply(
     }
 
     let resized = change.resizes.len();
+    let mut resized_ids: HashSet<String> = HashSet::new();
     for (id, new_rect) in &change.resizes {
         apply_resize(
             doc,
@@ -84,10 +85,18 @@ pub fn apply(
             *new_rect,
             &mut changed,
             &mut elem_changed,
+            &mut resized_ids,
         )?;
     }
 
-    let connectors = sync_arrows(doc, old_scene, &changed, &mut elem_changed, &skip_sync);
+    let connectors = sync_arrows(
+        doc,
+        old_scene,
+        &changed,
+        &mut elem_changed,
+        &skip_sync,
+        &resized_ids,
+    );
     Ok(ApplyReport {
         moved: expanded.len() + connector_moves.len(),
         resized,
@@ -185,6 +194,7 @@ fn apply_resize(
     new_rect: Rect,
     changed: &mut HashMap<String, (Rect, Rect)>,
     elem_changed: &mut HashMap<String, (Rect, Rect)>,
+    resized_ids: &mut HashSet<String>,
 ) -> anyhow::Result<()> {
     if let Some(component) = old_scene.component(id) {
         if component.kind != ComponentKind::Shape {
@@ -195,6 +205,8 @@ fn apply_resize(
             .first()
             .cloned()
             .unwrap_or_else(|| component.id.clone());
+        resized_ids.insert(id.to_string());
+        resized_ids.insert(primary.clone());
         set_primary_rect(doc, &primary, new_rect, elem_changed);
         if let Some(label_id) = &component.label_element {
             reposition_bound_text(doc, label_id, &primary, &new_rect, elem_changed);
@@ -208,6 +220,8 @@ fn apply_resize(
             .first()
             .cloned()
             .unwrap_or_else(|| container.id.clone());
+        resized_ids.insert(id.to_string());
+        resized_ids.insert(primary.clone());
         set_primary_rect(doc, &primary, new_rect, elem_changed);
         if let Some(title_id) = &container.title_element {
             let bound = doc
