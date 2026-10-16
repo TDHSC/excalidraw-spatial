@@ -1,0 +1,19 @@
+[package]
+name = "excalidraw-spatial"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "excalidraw_spatial"
+path = "src/lib.rs"
+
+[[bin]]
+name = "excal"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+unicode-width = "0.2"
