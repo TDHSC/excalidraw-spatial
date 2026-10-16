@@ -106,7 +106,7 @@ pub fn apply(
 
 type MoveList = Vec<(String, f64, f64)>;
 
-fn expand_moves(scene: &Scene, moves: &[(String, f64, f64)]) -> (MoveList, MoveList) {
+pub(crate) fn expand_moves(scene: &Scene, moves: &[(String, f64, f64)]) -> (MoveList, MoveList) {
     let mut expanded = Vec::new();
     let mut seen = HashSet::new();
     let mut connector_moves = Vec::new();

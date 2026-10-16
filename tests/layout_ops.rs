@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use excalidraw_spatial::linter::run_lint;
-use excalidraw_spatial::scene_graph::Scene;
+use excalidraw_spatial::scene_graph::{ContainerKind, Scene};
 use excalidraw_spatial::schema::Document;
 use excalidraw_spatial::text_metrics::TextSize;
 
@@ -817,4 +817,218 @@ fn fit_text_absorbs_left_anchored_overflow_and_clears_warnings() {
     let after = lint_json(&stdout);
     assert_eq!(after["summary"]["errors"], 0, "lint={after}");
     assert_eq!(after["summary"]["warnings"], 0, "lint={after}");
+}
+
+fn lane_with_three_boxes() -> String {
+    r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "z", "x": 0, "y": 0, "width": 600, "height": 300},
+    {"type": "text", "id": "t", "x": 16, "y": 12, "width": 80, "height": 25, "text": "Lane", "fontSize": 20},
+    {"type": "rectangle", "id": "a", "x": 40, "y": 110, "width": 140, "height": 80},
+    {"type": "rectangle", "id": "b", "x": 220, "y": 110, "width": 140, "height": 80},
+    {"type": "rectangle", "id": "c", "x": 400, "y": 110, "width": 140, "height": 80}
+  ]
+}"#
+    .to_string()
+}
+
+fn scene_of(doc_json: &str) -> Scene {
+    Scene::build(&Document::parse(doc_json).expect("parse layout output"))
+}
+
+#[test]
+fn distribute_straddling_child_grows_zone_on_crossed_side_only() {
+    let path = temp_path("b16-straddle.excalidraw");
+    fs::write(&path, lane_with_three_boxes()).expect("write lane");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "distribute",
+        path_str,
+        "--ids",
+        "a,b,c",
+        "--direction",
+        "horizontal",
+        "--gap",
+        "120",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: moved 2 item(s), resized 1 item(s), updated 0 connector(s)"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("excal: lint after change: errors: 0, warnings: 0, info: 0"),
+        "stderr={stderr}"
+    );
+
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "b"), "x"), 300.0);
+    approx(num(element(&out, "c"), "x"), 560.0);
+    let zone = element(&out, "z");
+    approx(num(zone, "x"), 0.0);
+    approx(num(zone, "y"), 0.0);
+    approx(num(zone, "width"), 740.0);
+    approx(num(zone, "height"), 300.0);
+    let title = element(&out, "t");
+    approx(num(title, "x"), 16.0);
+    approx(num(title, "y"), 12.0);
+
+    let scene = scene_of(&stdout);
+    assert_eq!(scene.component("c").unwrap().parent.as_deref(), Some("z"));
+}
+
+#[test]
+fn distribute_fully_outside_child_retains_zone_membership() {
+    let path = temp_path("b16-outside.excalidraw");
+    fs::write(&path, lane_with_three_boxes()).expect("write lane");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "distribute",
+        path_str,
+        "--ids",
+        "a,b,c",
+        "--direction",
+        "horizontal",
+        "--gap",
+        "200",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: lint after change: errors: 0, warnings: 0, info: 0"),
+        "stderr={stderr}"
+    );
+
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "c"), "x"), 720.0);
+    approx(num(element(&out, "z"), "width"), 900.0);
+    let scene = scene_of(&stdout);
+    assert_eq!(scene.component("c").unwrap().parent.as_deref(), Some("z"));
+}
+
+#[test]
+fn move_straddle_retains_but_full_exit_or_place_below_releases() {
+    let path = temp_path("b16-move-straddle.excalidraw");
+    fs::write(&path, lane_with_three_boxes()).expect("write lane");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) =
+        run_layout(&["layout", "move", path_str, "--id", "c", "--dx", "180"]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: lint after change: errors: 0"),
+        "stderr={stderr}"
+    );
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "z"), "width"), 760.0);
+    let scene = scene_of(&stdout);
+    assert_eq!(scene.component("c").unwrap().parent.as_deref(), Some("z"));
+
+    let path = temp_path("b16-move-exit.excalidraw");
+    fs::write(&path, lane_with_three_boxes()).expect("write lane");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) =
+        run_layout(&["layout", "move", path_str, "--id", "c", "--dx", "400"]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("resized 0 item(s)"), "stderr={stderr}");
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "z"), "width"), 600.0);
+    approx(num(element(&out, "c"), "x"), 800.0);
+    let scene = scene_of(&stdout);
+    assert_eq!(scene.component("c").unwrap().parent, None);
+    let zone = scene.container("z").expect("zone remains");
+    assert_eq!(zone.kind, ContainerKind::Zone);
+    let kids: Vec<_> = scene
+        .components
+        .iter()
+        .filter(|component| component.parent.as_deref() == Some("z"))
+        .map(|component| component.id.as_str())
+        .collect();
+    assert_eq!(kids, ["a", "b"]);
+
+    let path = temp_path("b16-place-below.excalidraw");
+    fs::write(&path, lane_with_three_boxes()).expect("write lane");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) =
+        run_layout(&["layout", "place", path_str, "--id", "c", "--below", "z"]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("resized 0 item(s)"), "stderr={stderr}");
+    let scene = scene_of(&stdout);
+    assert!(scene.component("c").unwrap().rect.y1 >= 300.0);
+    assert_eq!(scene.component("c").unwrap().parent, None);
+}
+
+fn adjacent_sibling_lanes() -> String {
+    // z2 is listed before c, so its z is lower and its center-containment would
+    // otherwise steal c after c straddles into z2.
+    r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "z", "x": 0, "y": 0, "width": 600, "height": 300},
+    {"type": "rectangle", "id": "z2", "x": 640, "y": 0, "width": 400, "height": 300},
+    {"type": "rectangle", "id": "a", "x": 40, "y": 110, "width": 140, "height": 80},
+    {"type": "rectangle", "id": "b", "x": 220, "y": 110, "width": 140, "height": 80},
+    {"type": "rectangle", "id": "c", "x": 400, "y": 110, "width": 140, "height": 80},
+    {"type": "rectangle", "id": "d", "x": 680, "y": 110, "width": 140, "height": 80},
+    {"type": "rectangle", "id": "e", "x": 860, "y": 110, "width": 140, "height": 80}
+  ]
+}"#
+    .to_string()
+}
+
+#[test]
+fn adjacent_sibling_zone_does_not_steal_retained_child() {
+    let path = temp_path("b16-sibling.excalidraw");
+    fs::write(&path, adjacent_sibling_lanes()).expect("write lanes");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "distribute",
+        path_str,
+        "--ids",
+        "a,b,c",
+        "--direction",
+        "horizontal",
+        "--gap",
+        "130",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "c"), "x"), 580.0);
+    let zone = element(&out, "z");
+    approx(num(zone, "x"), 0.0);
+    approx(num(zone, "width"), 760.0);
+    let scene = scene_of(&stdout);
+    assert_eq!(scene.component("c").unwrap().parent.as_deref(), Some("z"));
+    assert_eq!(scene.container("z2").unwrap().parent, None);
+
+    let grown = temp_path("b16-sibling-grown.excalidraw");
+    fs::write(&grown, &stdout).expect("write grown");
+    let grown_str = grown.to_str().expect("utf-8 path");
+    let (code, moved, stderr) =
+        run_layout(&["layout", "move", grown_str, "--id", "z2", "--dx", "160"]);
+    cleanup(&grown);
+    assert_eq!(code, 0, "stdout={moved} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: lint after change: errors: 0, warnings: 0, info: 0"),
+        "stderr={stderr}"
+    );
+    let after = lint_json(&moved);
+    let issues = after["issues"].as_array().expect("issues");
+    assert!(
+        issues
+            .iter()
+            .all(|issue| issue["rule"] != "OVERLAP_COMPONENT"),
+        "remaining overlaps: {after}"
+    );
 }

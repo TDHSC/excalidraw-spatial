@@ -1,18 +1,28 @@
+use std::collections::{HashMap, HashSet};
+
 use crate::geometry::{ceil_px, Rect};
-use crate::linter::{text_factor, TEXT_PAD_X, TEXT_PAD_Y, TEXT_SHAPES};
-use crate::scene_graph::{Component, ComponentKind, ContainerKind, Scene, Target};
+use crate::linter::{text_factor, MIN_GAP, TEXT_PAD_X, TEXT_PAD_Y, TEXT_SHAPES};
+use crate::scene_graph::{zone_admits, Component, ComponentKind, ContainerKind, Scene, Target};
 use crate::{Axis, Direction, PlaceAlign};
 
 use super::Change;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetainPolicy {
+    Arrange,
+    Position,
+}
 
 pub fn move_target(scene: &Scene, id: &str, dx: f64, dy: f64) -> anyhow::Result<Change> {
     let resolved = match scene.resolve(id)? {
         Target::Component(id) | Target::Container(id) | Target::Connector(id) => id,
     };
-    Ok(Change {
+    let mut change = Change {
         moves: vec![(resolved, dx, dy)],
         resizes: vec![],
-    })
+    };
+    retain_zone_membership(scene, &mut change, RetainPolicy::Position);
+    Ok(change)
 }
 
 pub fn align(scene: &Scene, ids: &[String], axis: Axis) -> anyhow::Result<Change> {
@@ -33,10 +43,12 @@ pub fn align(scene: &Scene, ids: &[String], axis: Axis) -> anyhow::Result<Change
         };
         moves.push((id, dx, dy));
     }
-    Ok(Change {
+    let mut change = Change {
         moves,
         resizes: vec![],
-    })
+    };
+    retain_zone_membership(scene, &mut change, RetainPolicy::Arrange);
+    Ok(change)
 }
 
 fn resolve_boxes(scene: &Scene, ids: &[String]) -> anyhow::Result<Vec<(String, Rect)>> {
@@ -131,10 +143,12 @@ pub fn distribute(
         moves.push((id, dx, dy));
         prev = rect.translate(dx, dy);
     }
-    Ok(Change {
+    let mut change = Change {
         moves,
         resizes: vec![],
-    })
+    };
+    retain_zone_membership(scene, &mut change, RetainPolicy::Arrange);
+    Ok(change)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -177,10 +191,12 @@ pub fn place(
     } else {
         anyhow::bail!("place needs exactly one of --right-of, --left-of, --below, --above");
     };
-    Ok(Change {
+    let mut change = Change {
         moves: vec![(moved_id, dx, dy)],
         resizes: vec![],
-    })
+    };
+    retain_zone_membership(scene, &mut change, RetainPolicy::Position);
+    Ok(change)
 }
 
 fn cross_delta(anchor: Rect, moved: Rect, horizontal: bool, align: &PlaceAlign) -> f64 {
@@ -207,6 +223,220 @@ fn cross_delta(anchor: Rect, moved: Rect, horizontal: bool, align: &PlaceAlign) 
         PlaceAlign::Start => anchor_start - moved_start,
         PlaceAlign::Center => anchor_mid - moved_mid,
         PlaceAlign::End => anchor_end - moved_end,
+    }
+}
+
+fn retain_zone_membership(scene: &Scene, change: &mut Change, policy: RetainPolicy) {
+    let mut pinned = HashSet::new();
+    for (id, _, _) in &change.moves {
+        if scene.connector(id).is_none() {
+            pinned.insert(id.clone());
+        }
+    }
+    for (id, _) in &change.resizes {
+        pinned.insert(id.clone());
+    }
+
+    let (expanded, _) = super::expand_moves(scene, &change.moves);
+    let mut grown: HashMap<String, Rect> = scene
+        .containers
+        .iter()
+        .filter(|container| container.kind == ContainerKind::Zone)
+        .map(|container| (container.id.clone(), container.rect))
+        .collect();
+
+    for (id, dx, dy) in &expanded {
+        if dx.abs() < 1e-9 && dy.abs() < 1e-9 {
+            continue;
+        }
+        let (rect, z, parent, k_is_zone) = if let Some(component) = scene.component(id) {
+            (component.rect, component.z, component.parent.clone(), false)
+        } else if let Some(container) = scene.container(id) {
+            (
+                container.rect,
+                container.z,
+                container.parent.clone(),
+                container.kind == ContainerKind::Zone,
+            )
+        } else {
+            continue;
+        };
+        let Some(parent_id) = parent else {
+            continue;
+        };
+        let Some(parent_zone) = scene.container(&parent_id) else {
+            continue;
+        };
+        if parent_zone.kind != ContainerKind::Zone {
+            continue;
+        }
+        if pinned_or_ancestor(scene, &pinned, &parent_id) {
+            continue;
+        }
+        let moved = rect.translate(*dx, *dy);
+        if zone_admits(&parent_zone.rect, parent_zone.z, &moved, z, k_is_zone) {
+            continue;
+        }
+        if policy == RetainPolicy::Position
+            && (intentional_exit(
+                scene,
+                parent_zone.rect,
+                &moved,
+                z,
+                k_is_zone,
+                id,
+                &parent_id,
+            ))
+        {
+            continue;
+        }
+        grow_crossed(
+            grown.get_mut(&parent_id).expect("zone seeded"),
+            parent_zone.rect,
+            moved,
+            k_is_zone,
+        );
+    }
+
+    let mut cascade: Vec<&crate::scene_graph::Container> = scene
+        .containers
+        .iter()
+        .filter(|container| container.kind == ContainerKind::Zone)
+        .collect();
+    cascade.sort_by_key(|zone| std::cmp::Reverse(zone.z));
+    for zone in cascade {
+        let grown_p = grown[&zone.id];
+        if grown_p == zone.rect {
+            continue;
+        }
+        let Some(parent_id) = zone.parent.clone() else {
+            continue;
+        };
+        let Some(parent_zone) = scene.container(&parent_id) else {
+            continue;
+        };
+        if parent_zone.kind != ContainerKind::Zone {
+            continue;
+        }
+        if pinned_or_ancestor(scene, &pinned, &parent_id) {
+            continue;
+        }
+        let grown_q = grown[&parent_id];
+        if zone_admits(&grown_q, parent_zone.z, &grown_p, zone.z, true) {
+            continue;
+        }
+        grow_zone_edge(
+            grown.get_mut(&parent_id).expect("parent seeded"),
+            parent_zone.rect,
+            grown_p,
+        );
+    }
+
+    let mut resized: Vec<&crate::scene_graph::Container> = scene
+        .containers
+        .iter()
+        .filter(|container| container.kind == ContainerKind::Zone)
+        .filter(|container| grown[&container.id] != container.rect)
+        .collect();
+    resized.sort_by_key(|container| container.z);
+    for zone in resized {
+        change.resizes.push((zone.id.clone(), grown[&zone.id]));
+    }
+}
+
+fn intentional_exit(
+    scene: &Scene,
+    parent_rect: Rect,
+    moved: &Rect,
+    z: usize,
+    k_is_zone: bool,
+    moved_id: &str,
+    parent_id: &str,
+) -> bool {
+    if !parent_rect.overlaps(moved) {
+        return true;
+    }
+    scene.containers.iter().any(|candidate| {
+        candidate.kind == ContainerKind::Zone
+            && candidate.id != moved_id
+            && candidate.id != parent_id
+            && !is_descendant(scene, moved_id, &candidate.id)
+            && !is_ancestor(scene, parent_id, &candidate.id)
+            && zone_admits(&candidate.rect, candidate.z, moved, z, k_is_zone)
+    })
+}
+
+fn pinned_or_ancestor(scene: &Scene, pinned: &HashSet<String>, id: &str) -> bool {
+    let mut current = Some(id.to_string());
+    let mut seen = HashSet::new();
+    while let Some(node) = current {
+        if pinned.contains(&node) {
+            return true;
+        }
+        if !seen.insert(node.clone()) {
+            return false;
+        }
+        current = scene
+            .container(&node)
+            .and_then(|container| container.parent.clone());
+    }
+    false
+}
+
+fn is_ancestor(scene: &Scene, ancestor: &str, start: &str) -> bool {
+    let mut current = Some(start.to_string());
+    let mut seen = HashSet::new();
+    while let Some(node) = current {
+        if node == ancestor {
+            return true;
+        }
+        if !seen.insert(node.clone()) {
+            return false;
+        }
+        current = scene
+            .container(&node)
+            .and_then(|container| container.parent.clone())
+            .or_else(|| {
+                scene
+                    .component(&node)
+                    .and_then(|component| component.parent.clone())
+            });
+    }
+    false
+}
+
+fn is_descendant(scene: &Scene, ancestor: &str, id: &str) -> bool {
+    id != ancestor && is_ancestor(scene, ancestor, id)
+}
+
+fn grow_crossed(grown: &mut Rect, original: Rect, moved: Rect, k_is_zone: bool) {
+    let center = moved.center();
+    if center.x < original.x1 || (k_is_zone && moved.x1 < original.x1) {
+        grown.x1 = grown.x1.min(moved.x1 - f64::from(MIN_GAP));
+    }
+    if center.x > original.x2 || (k_is_zone && moved.x2 > original.x2) {
+        grown.x2 = grown.x2.max(moved.x2 + f64::from(MIN_GAP));
+    }
+    if center.y < original.y1 || (k_is_zone && moved.y1 < original.y1) {
+        grown.y1 = grown.y1.min(moved.y1 - f64::from(MIN_GAP));
+    }
+    if center.y > original.y2 || (k_is_zone && moved.y2 > original.y2) {
+        grown.y2 = grown.y2.max(moved.y2 + f64::from(MIN_GAP));
+    }
+}
+
+fn grow_zone_edge(grown_q: &mut Rect, q_rect: Rect, grown_p: Rect) {
+    if grown_p.x1 < q_rect.x1 {
+        grown_q.x1 = grown_q.x1.min(grown_p.x1 - f64::from(MIN_GAP));
+    }
+    if grown_p.x2 > q_rect.x2 {
+        grown_q.x2 = grown_q.x2.max(grown_p.x2 + f64::from(MIN_GAP));
+    }
+    if grown_p.y1 < q_rect.y1 {
+        grown_q.y1 = grown_q.y1.min(grown_p.y1 - f64::from(MIN_GAP));
+    }
+    if grown_p.y2 > q_rect.y2 {
+        grown_q.y2 = grown_q.y2.max(grown_p.y2 + f64::from(MIN_GAP));
     }
 }
 

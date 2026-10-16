@@ -956,3 +956,74 @@ fn grouped_contained_children_between_ratios_still_dissolve() {
     assert_eq!(scene.component("a").unwrap().parent.as_deref(), Some("bg"));
     assert_eq!(scene.component("b").unwrap().parent.as_deref(), Some("bg"));
 }
+
+#[test]
+fn overlapping_sibling_zone_is_not_swallowed_as_child() {
+    // z2's center sits inside z, but z2 sticks out past z's right edge.
+    // A partial border overlap must not make the smaller sibling a child.
+    let scene = parse_scene(
+        r#"{
+            "elements": [
+                {
+                    "id": "z",
+                    "type": "rectangle",
+                    "x": 0,
+                    "y": 0,
+                    "width": 900,
+                    "height": 300
+                },
+                {
+                    "id": "a",
+                    "type": "rectangle",
+                    "x": 40,
+                    "y": 110,
+                    "width": 140,
+                    "height": 80
+                },
+                {
+                    "id": "b",
+                    "type": "rectangle",
+                    "x": 220,
+                    "y": 110,
+                    "width": 140,
+                    "height": 80
+                },
+                {
+                    "id": "z2",
+                    "type": "rectangle",
+                    "x": 640,
+                    "y": 0,
+                    "width": 400,
+                    "height": 300
+                },
+                {
+                    "id": "d",
+                    "type": "rectangle",
+                    "x": 680,
+                    "y": 110,
+                    "width": 140,
+                    "height": 80
+                },
+                {
+                    "id": "e",
+                    "type": "rectangle",
+                    "x": 860,
+                    "y": 110,
+                    "width": 140,
+                    "height": 80
+                }
+            ]
+        }"#,
+    );
+
+    let z = scene.container("z").expect("zone z");
+    let z2 = scene.container("z2").expect("zone z2");
+    assert_eq!(z.kind, ContainerKind::Zone);
+    assert_eq!(z2.kind, ContainerKind::Zone);
+    assert_eq!(z.parent, None);
+    assert_eq!(z2.parent, None);
+    assert_eq!(scene.component("a").unwrap().parent.as_deref(), Some("z"));
+    assert_eq!(scene.component("b").unwrap().parent.as_deref(), Some("z"));
+    assert_eq!(scene.component("d").unwrap().parent.as_deref(), Some("z2"));
+    assert_eq!(scene.component("e").unwrap().parent.as_deref(), Some("z2"));
+}

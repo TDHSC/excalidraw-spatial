@@ -807,96 +807,147 @@ fn assign_zone_titles(
     }
 }
 
-fn assign_parents(components: &mut [Component], containers: &mut [Container]) {
-    let frames: Vec<(String, Rect, usize)> = containers
-        .iter()
-        .filter(|container| container.kind == ContainerKind::Frame)
-        .map(|container| (container.id.clone(), container.rect, container.z))
-        .collect();
-    let zones: Vec<(String, Rect, usize)> = containers
-        .iter()
-        .filter(|container| container.kind == ContainerKind::Zone)
-        .map(|container| (container.id.clone(), container.rect, container.z))
-        .collect();
-
-    for component in components.iter_mut() {
-        component.parent = smallest_parent(parent_candidates(
-            component.frame_id.as_deref(),
-            component.rect,
-            component.z,
-            None,
-            &frames,
-            &zones,
-        ));
+/// A container at `p_rect`/`p_z` may parent `k` only when it is behind `k` and
+/// contains `k`'s center. A zone child must also be strictly smaller and fully
+/// enclosed, so side-by-side swimlanes that only overlap at a border stay siblings.
+pub(crate) fn zone_admits(
+    p_rect: &Rect,
+    p_z: usize,
+    k_rect: &Rect,
+    k_z: usize,
+    k_is_zone: bool,
+) -> bool {
+    if p_z >= k_z || !p_rect.contains_point(k_rect.center()) {
+        return false;
     }
-    // Indexing keeps the zone snapshot and the parent write on the same slot.
-    #[allow(clippy::needless_range_loop)]
-    for index in 0..containers.len() {
-        if containers[index].kind != ContainerKind::Zone {
-            continue;
-        }
+    if k_is_zone {
+        return p_rect.area() > k_rect.area() && p_rect.contains_rect(k_rect);
+    }
+    true
+}
+
+fn assign_parents(components: &mut [Component], containers: &mut [Container]) {
+    // Containers first, in z order, so a later zone sees parents already written.
+    let mut zone_order: Vec<usize> = containers
+        .iter()
+        .enumerate()
+        .filter(|(_, container)| container.kind == ContainerKind::Zone)
+        .map(|(index, _)| index)
+        .collect();
+    zone_order.sort_by_key(|&index| containers[index].z);
+    for index in zone_order {
         let (frame_id, rect, z, id) = {
             let zone = &containers[index];
             (zone.frame_id.clone(), zone.rect, zone.z, zone.id.clone())
         };
-        containers[index].parent = smallest_parent(parent_candidates(
-            frame_id.as_deref(),
-            rect,
-            z,
-            Some(id.as_str()),
-            &frames,
-            &zones,
-        ));
+        containers[index].parent = pick_parent(containers, frame_id.as_deref(), rect, z, &id);
+    }
+
+    for component in components.iter_mut() {
+        component.parent = pick_parent(
+            containers,
+            component.frame_id.as_deref(),
+            component.rect,
+            component.z,
+            &component.id,
+        );
     }
 }
 
-fn parent_candidates(
+fn pick_parent(
+    containers: &[Container],
     child_frame_id: Option<&str>,
-    rect: Rect,
+    target_rect: Rect,
     z: usize,
-    exclude_zone: Option<&str>,
-    frames: &[(String, Rect, usize)],
-    zones: &[(String, Rect, usize)],
-) -> Vec<(String, f64, usize)> {
+    self_id: &str,
+) -> Option<String> {
+    let candidates = parent_candidates(containers, child_frame_id, target_rect, z, self_id);
+    let leaves = leaf_candidates(containers, &candidates);
+    smallest_parent(&leaves, target_rect)
+}
+
+fn is_zone(containers: &[Container], id: &str) -> bool {
+    containers
+        .iter()
+        .any(|container| container.id == id && container.kind == ContainerKind::Zone)
+}
+
+fn parent_candidates<'a>(
+    containers: &'a [Container],
+    child_frame_id: Option<&str>,
+    target_rect: Rect,
+    z: usize,
+    self_id: &str,
+) -> Vec<&'a Container> {
+    let k_is_zone = is_zone(containers, self_id);
     let mut candidates = Vec::new();
     // A frame parents a child only when the child names that frame. Two missing
     // frame ids are not a match.
     if let Some(frame_id) = child_frame_id {
-        for (id, frame_rect, frame_z) in frames {
-            if id == frame_id {
-                candidates.push((id.clone(), frame_rect.area(), *frame_z));
+        for container in containers {
+            if container.kind == ContainerKind::Frame && container.id == frame_id {
+                candidates.push(container);
             }
         }
     }
-    let child_area = if exclude_zone.is_some() {
-        Some(rect.area())
-    } else {
-        None
-    };
-    let center = rect.center();
-    for (id, zone_rect, zone_z) in zones {
-        if exclude_zone == Some(id.as_str()) || *zone_z >= z {
+    for container in containers {
+        if container.kind != ContainerKind::Zone || container.id == self_id {
             continue;
         }
-        if !zone_rect.contains_point(center) {
-            continue;
+        if zone_admits(&container.rect, container.z, &target_rect, z, k_is_zone) {
+            candidates.push(container);
         }
-        if child_area.is_some_and(|area| zone_rect.area() <= area) {
-            continue;
-        }
-        candidates.push((id.clone(), zone_rect.area(), *zone_z));
     }
     candidates
 }
 
-fn smallest_parent(mut candidates: Vec<(String, f64, usize)>) -> Option<String> {
-    candidates.sort_by(|left, right| {
-        left.1
-            .partial_cmp(&right.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(left.2.cmp(&right.2))
+fn leaf_candidates<'a>(
+    containers: &'a [Container],
+    candidates: &[&'a Container],
+) -> Vec<&'a Container> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            !candidates.iter().any(|other| {
+                other.id != candidate.id && ancestor_of(containers, &candidate.id, &other.id)
+            })
+        })
+        .collect()
+}
+
+fn ancestor_of(containers: &[Container], ancestor: &str, start: &str) -> bool {
+    let mut id = start.to_string();
+    let mut seen = HashSet::new();
+    while let Some(parent) = containers
+        .iter()
+        .find(|container| container.id == id)
+        .and_then(|container| container.parent.clone())
+    {
+        if parent == ancestor {
+            return true;
+        }
+        if !seen.insert(parent.clone()) {
+            return false;
+        }
+        id = parent;
+    }
+    false
+}
+
+fn smallest_parent(candidates: &[&Container], target_rect: Rect) -> Option<String> {
+    let mut ranked: Vec<&Container> = candidates.to_vec();
+    ranked.sort_by(|left, right| {
+        (left.kind != ContainerKind::Frame)
+            .cmp(&(right.kind != ContainerKind::Frame))
+            .then(
+                (!left.rect.contains_rect(&target_rect))
+                    .cmp(&(!right.rect.contains_rect(&target_rect))),
+            )
+            .then(left.rect.area().total_cmp(&right.rect.area()))
+            .then(left.z.cmp(&right.z))
     });
-    candidates.into_iter().next().map(|(id, _, _)| id)
+    ranked.first().map(|container| container.id.clone())
 }
 
 fn group_should_dissolve(members: &[&RawElement]) -> bool {
