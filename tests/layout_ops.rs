@@ -1275,3 +1275,339 @@ fn fit_container_nested_zone_stops_at_parent_title_band() {
         Some("z_ingress_title")
     );
 }
+
+fn fixture_p() -> String {
+    r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "z_prefill", "x": 430, "y": 55, "width": 560, "height": 210},
+    {"type": "text", "id": "z_prefill_title", "x": 446, "y": 67, "width": 420, "height": 25, "text": "2a. Prefill Cluster", "fontSize": 20},
+    {"type": "rectangle", "id": "p_sched", "x": 460, "y": 115, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "p_node1", "x": 600, "y": 115, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "p_node2", "x": 810, "y": 115, "width": 160, "height": 75}
+  ]
+}"#
+    .to_string()
+}
+
+fn fixture_p_plus_r() -> String {
+    r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "z_prefill", "x": 430, "y": 55, "width": 560, "height": 210},
+    {"type": "text", "id": "z_prefill_title", "x": 446, "y": 67, "width": 420, "height": 25, "text": "2a. Prefill Cluster", "fontSize": 20},
+    {"type": "rectangle", "id": "z_rag", "x": 1030, "y": 55, "width": 610, "height": 210},
+    {"type": "text", "id": "z_rag_title", "x": 1046, "y": 67, "width": 200, "height": 25, "text": "2b. RAG", "fontSize": 20},
+    {"type": "rectangle", "id": "p_sched", "x": 460, "y": 115, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "p_node1", "x": 600, "y": 115, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "p_node2", "x": 810, "y": 115, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "embed_svc", "x": 1250, "y": 115, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "milvus", "x": 1450, "y": 115, "width": 160, "height": 75}
+  ]
+}"#
+    .to_string()
+}
+
+fn fixture_n() -> String {
+    r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "z_pci", "x": 0, "y": 0, "width": 1080, "height": 620},
+    {"type": "text", "id": "z_pci_title", "x": 16, "y": 12, "width": 324, "height": 25, "text": "Global PCI-DSS Payment Mesh", "fontSize": 20},
+    {"type": "rectangle", "id": "z_ingress", "x": 20, "y": 150, "width": 500, "height": 260},
+    {"type": "text", "id": "z_ingress_title", "x": 36, "y": 162, "width": 228, "height": 25, "text": "1. Edge & Risk Gate", "fontSize": 20},
+    {"type": "rectangle", "id": "pay_gw", "x": 60, "y": 240, "width": 175, "height": 75},
+    {"type": "rectangle", "id": "risk", "x": 300, "y": 240, "width": 175, "height": 75}
+  ]
+}"#
+    .to_string()
+}
+
+fn write_fixture(tag: &str, body: &str) -> PathBuf {
+    let path = temp_path(tag);
+    fs::write(&path, body).expect("write fixture");
+    path
+}
+
+#[test]
+fn same_parent_place_beside_sibling_zone_retains_and_overlap_is_movable() {
+    let path = write_fixture("b19-place-sibling.excalidraw", &fixture_p_plus_r());
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "place",
+        path_str,
+        "--id",
+        "p_node2",
+        "--right-of",
+        "p_node1",
+        "--gap",
+        "210",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: moved 1 item(s), resized 1 item(s), updated 0 connector(s)"),
+        "stderr={stderr}"
+    );
+
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "p_node2"), "x"), 970.0);
+    let prefill = element(&out, "z_prefill");
+    approx(num(prefill, "x"), 430.0);
+    approx(num(prefill, "y"), 55.0);
+    approx(num(prefill, "width"), 740.0);
+    approx(num(prefill, "height"), 210.0);
+    let scene = scene_of(&stdout);
+    assert_eq!(
+        scene.component("p_node2").unwrap().parent.as_deref(),
+        Some("z_prefill")
+    );
+
+    let issues = lint_issues(&stdout);
+    let overlap = issues
+        .iter()
+        .find(|issue| {
+            issue["rule"] == "OVERLAP_COMPONENT"
+                && issue["targets"] == serde_json::json!(["z_prefill", "z_rag"])
+        })
+        .unwrap_or_else(|| panic!("expected z_prefill/z_rag overlap, issues={issues:?}"));
+    let command = overlap["command"].as_str().expect("command");
+    assert!(
+        command.ends_with(" --id z_rag --dx 180"),
+        "command={command}"
+    );
+
+    let grown = write_fixture("b19-place-sibling-grown.excalidraw", &stdout);
+    let grown_str = grown.to_str().expect("utf-8 path");
+    let (code, moved, stderr) =
+        run_layout(&["layout", "move", grown_str, "--id", "z_rag", "--dx", "180"]);
+    cleanup(&grown);
+    assert_eq!(code, 0, "stdout={moved} stderr={stderr}");
+    let moved_doc = parse_json(&moved);
+    let rag = element(&moved_doc, "z_rag");
+    approx(num(rag, "x"), 1210.0);
+    let scene = scene_of(&moved);
+    assert_eq!(
+        scene.component("p_node2").unwrap().parent.as_deref(),
+        Some("z_prefill")
+    );
+    assert!(
+        lint_issues(&moved).iter().all(|issue| {
+            !(issue["rule"] == "OVERLAP_COMPONENT"
+                && issue["targets"]
+                    .as_array()
+                    .is_some_and(|targets| targets.iter().any(|target| target == "z_rag")))
+        }),
+        "z_rag still overlaps: {}",
+        serde_json::to_string(&lint_issues(&moved)).expect("issues json")
+    );
+}
+
+#[test]
+fn same_parent_place_disjoint_from_old_zone_still_retains() {
+    let path = write_fixture("b19-place-disjoint.excalidraw", &fixture_p());
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "place",
+        path_str,
+        "--id",
+        "p_node2",
+        "--right-of",
+        "p_node1",
+        "--gap",
+        "300",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("resized 1 item(s)"), "stderr={stderr}");
+
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "p_node2"), "x"), 1060.0);
+    approx(num(element(&out, "z_prefill"), "width"), 830.0);
+    let scene = scene_of(&stdout);
+    assert_eq!(
+        scene.component("p_node2").unwrap().parent.as_deref(),
+        Some("z_prefill")
+    );
+}
+
+#[test]
+fn cross_parent_place_and_move_exit_do_not_grow_zone() {
+    let path = write_fixture("b19-place-cross.excalidraw", &fixture_p());
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "place",
+        path_str,
+        "--id",
+        "p_node2",
+        "--right-of",
+        "z_prefill",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("resized 0 item(s)"), "stderr={stderr}");
+    let out = parse_json(&stdout);
+    let node = element(&out, "p_node2");
+    approx(num(node, "x"), 1030.0);
+    approx(num(node, "y"), 122.5);
+    let scene = scene_of(&stdout);
+    assert_eq!(scene.component("p_node2").unwrap().parent, None);
+
+    let path = write_fixture("b19-move-exit.excalidraw", &fixture_p());
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) =
+        run_layout(&["layout", "move", path_str, "--id", "p_node2", "--dx", "500"]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("resized 0 item(s)"), "stderr={stderr}");
+    approx(
+        num(element(&parse_json(&stdout), "z_prefill"), "width"),
+        560.0,
+    );
+}
+
+#[test]
+fn upward_place_reserves_title_extra_above_child() {
+    let path = write_fixture("b19-title-extra.excalidraw", &lane_with_three_boxes());
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout", "place", path_str, "--id", "c", "--above", "b", "--gap", "80",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("resized 1 item(s)"), "stderr={stderr}");
+    assert!(
+        stderr.contains("excal: lint after change: errors: 0, warnings: 0, info: 0"),
+        "stderr={stderr}"
+    );
+
+    let out = parse_json(&stdout);
+    let child = element(&out, "c");
+    approx(num(child, "x"), 220.0);
+    approx(num(child, "y"), -50.0);
+    let zone = element(&out, "z");
+    approx(num(zone, "x"), 0.0);
+    approx(num(zone, "y"), -125.0);
+    approx(num(zone, "width"), 600.0);
+    approx(num(zone, "height"), 425.0);
+    let title = element(&out, "t");
+    approx(num(title, "x"), 16.0);
+    approx(num(title, "y"), -113.0);
+
+    let scene = scene_of(&stdout);
+    assert_eq!(scene.component("c").unwrap().parent.as_deref(), Some("z"));
+    assert_eq!(
+        scene.container("z").unwrap().title_element.as_deref(),
+        Some("t")
+    );
+}
+
+#[test]
+fn nested_upward_place_cascades_when_child_enters_parent_title_band() {
+    let path = write_fixture("b19-nested-cascade.excalidraw", &fixture_n());
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout", "place", path_str, "--id", "risk", "--above", "pay_gw", "--gap", "75",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: moved 1 item(s), resized 2 item(s), updated 0 connector(s)"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("excal: lint after change: errors: 0, warnings: 0, info: 0"),
+        "stderr={stderr}"
+    );
+
+    let out = parse_json(&stdout);
+    let risk = element(&out, "risk");
+    approx(num(risk, "x"), 60.0);
+    approx(num(risk, "y"), 90.0);
+    let ingress = element(&out, "z_ingress");
+    approx(num(ingress, "x"), 20.0);
+    approx(num(ingress, "y"), 15.0);
+    approx(num(ingress, "width"), 500.0);
+    approx(num(ingress, "height"), 395.0);
+    let ingress_title = element(&out, "z_ingress_title");
+    approx(num(ingress_title, "x"), 36.0);
+    approx(num(ingress_title, "y"), 27.0);
+    let pci = element(&out, "z_pci");
+    approx(num(pci, "x"), 0.0);
+    approx(num(pci, "y"), -60.0);
+    approx(num(pci, "width"), 1080.0);
+    approx(num(pci, "height"), 680.0);
+    let pci_title = element(&out, "z_pci_title");
+    approx(num(pci_title, "x"), 16.0);
+    approx(num(pci_title, "y"), -48.0);
+
+    let scene = scene_of(&stdout);
+    assert_eq!(
+        scene
+            .container("z_ingress")
+            .unwrap()
+            .title_element
+            .as_deref(),
+        Some("z_ingress_title")
+    );
+    assert_eq!(
+        scene.container("z_pci").unwrap().title_element.as_deref(),
+        Some("z_pci_title")
+    );
+    assert_eq!(
+        scene.container("z_ingress").unwrap().parent.as_deref(),
+        Some("z_pci")
+    );
+    assert_eq!(
+        scene.component("risk").unwrap().parent.as_deref(),
+        Some("z_ingress")
+    );
+}
+
+#[test]
+fn distribute_on_fixture_p_plus_r_retains_then_clears_overlap() {
+    let path = write_fixture("b19-distribute.excalidraw", &fixture_p_plus_r());
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "distribute",
+        path_str,
+        "--ids",
+        "p_sched,p_node1,p_node2",
+        "--direction",
+        "horizontal",
+        "--gap",
+        "95",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "p_node1"), "x"), 715.0);
+    approx(num(element(&out, "p_node2"), "x"), 970.0);
+    approx(num(element(&out, "z_prefill"), "width"), 740.0);
+    let scene = scene_of(&stdout);
+    assert_eq!(
+        scene.component("p_node2").unwrap().parent.as_deref(),
+        Some("z_prefill")
+    );
+
+    let grown = write_fixture("b19-distribute-grown.excalidraw", &stdout);
+    let grown_str = grown.to_str().expect("utf-8 path");
+    let (code, moved, stderr) =
+        run_layout(&["layout", "move", grown_str, "--id", "z_rag", "--dx", "180"]);
+    cleanup(&grown);
+    assert_eq!(code, 0, "stdout={moved} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: lint after change: errors: 0"),
+        "stderr={stderr}"
+    );
+    let after = lint_json(&moved);
+    assert_eq!(after["summary"]["errors"], 0, "lint={after}");
+}

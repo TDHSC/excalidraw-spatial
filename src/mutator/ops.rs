@@ -289,27 +289,31 @@ pub fn place(
 ) -> anyhow::Result<Change> {
     let gap = gap.unwrap_or(40.0);
     let (moved_id, moved) = resolve_box(scene, id)?;
-    let (dx, dy) = if let Some(anchor_id) = right_of {
-        let (_, anchor) = resolve_box(scene, anchor_id)?;
+    let (anchor_id, dx, dy) = if let Some(anchor_id) = right_of {
+        let (anchor_id, anchor) = resolve_box(scene, anchor_id)?;
         (
+            anchor_id,
             anchor.x2 + gap - moved.x1,
             cross_delta(anchor, moved, false, &align),
         )
     } else if let Some(anchor_id) = left_of {
-        let (_, anchor) = resolve_box(scene, anchor_id)?;
+        let (anchor_id, anchor) = resolve_box(scene, anchor_id)?;
         (
+            anchor_id,
             anchor.x1 - gap - moved.x2,
             cross_delta(anchor, moved, false, &align),
         )
     } else if let Some(anchor_id) = below {
-        let (_, anchor) = resolve_box(scene, anchor_id)?;
+        let (anchor_id, anchor) = resolve_box(scene, anchor_id)?;
         (
+            anchor_id,
             cross_delta(anchor, moved, true, &align),
             anchor.y2 + gap - moved.y1,
         )
     } else if let Some(anchor_id) = above {
-        let (_, anchor) = resolve_box(scene, anchor_id)?;
+        let (anchor_id, anchor) = resolve_box(scene, anchor_id)?;
         (
+            anchor_id,
             cross_delta(anchor, moved, true, &align),
             anchor.y1 - gap - moved.y2,
         )
@@ -317,11 +321,38 @@ pub fn place(
         anyhow::bail!("place needs exactly one of --right-of, --left-of, --below, --above");
     };
     let mut change = Change {
-        moves: vec![(moved_id, dx, dy)],
+        moves: vec![(moved_id.clone(), dx, dy)],
         resizes: vec![],
     };
-    retain_zone_membership(scene, &mut change, RetainPolicy::Position);
+    retain_zone_membership(
+        scene,
+        &mut change,
+        place_policy(scene, &moved_id, &anchor_id),
+    );
     Ok(change)
+}
+
+fn scene_parent(scene: &Scene, id: &str) -> Option<String> {
+    scene
+        .component(id)
+        .and_then(|component| component.parent.clone())
+        .or_else(|| {
+            scene
+                .container(id)
+                .and_then(|container| container.parent.clone())
+        })
+}
+
+fn place_policy(scene: &Scene, moved_id: &str, anchor_id: &str) -> RetainPolicy {
+    match (
+        scene_parent(scene, moved_id),
+        scene_parent(scene, anchor_id),
+    ) {
+        (Some(moved_parent), Some(anchor_parent)) if moved_parent == anchor_parent => {
+            RetainPolicy::Arrange
+        }
+        _ => RetainPolicy::Position,
+    }
 }
 
 fn cross_delta(anchor: Rect, moved: Rect, horizontal: bool, align: &PlaceAlign) -> f64 {
@@ -417,7 +448,7 @@ fn retain_zone_membership(scene: &Scene, change: &mut Change, policy: RetainPoli
         }
         grow_crossed(
             grown.get_mut(&parent_id).expect("zone seeded"),
-            parent_zone.rect,
+            parent_zone,
             moved,
             k_is_zone,
         );
@@ -447,13 +478,18 @@ fn retain_zone_membership(scene: &Scene, change: &mut Change, policy: RetainPoli
             continue;
         }
         let grown_q = grown[&parent_id];
-        if zone_admits(&grown_q, parent_zone.z, &grown_p, zone.z, true) {
+        let title_encroached = grown_p.y1 < zone.rect.y1
+            && title_band_floor(parent_zone, &grown_q).is_some_and(|floor| grown_p.y1 < floor);
+        if zone_admits(&grown_q, parent_zone.z, &grown_p, zone.z, true) && !title_encroached {
             continue;
         }
         grow_zone_edge(
             grown.get_mut(&parent_id).expect("parent seeded"),
-            parent_zone.rect,
+            parent_zone,
+            &grown_q,
             grown_p,
+            zone.rect,
+            title_encroached,
         );
     }
 
@@ -534,7 +570,16 @@ fn is_descendant(scene: &Scene, ancestor: &str, id: &str) -> bool {
     id != ancestor && is_ancestor(scene, ancestor, id)
 }
 
-fn grow_crossed(grown: &mut Rect, original: Rect, moved: Rect, k_is_zone: bool) {
+fn title_extra(zone: &Container) -> f64 {
+    if zone.title_element.is_some() {
+        zone.title_height.unwrap_or(0.0) + 10.0
+    } else {
+        0.0
+    }
+}
+
+fn grow_crossed(grown: &mut Rect, parent: &Container, moved: Rect, k_is_zone: bool) {
+    let original = parent.rect;
     let center = moved.center();
     if center.x < original.x1 || (k_is_zone && moved.x1 < original.x1) {
         grown.x1 = grown.x1.min(moved.x1 - f64::from(MIN_GAP));
@@ -543,22 +588,37 @@ fn grow_crossed(grown: &mut Rect, original: Rect, moved: Rect, k_is_zone: bool) 
         grown.x2 = grown.x2.max(moved.x2 + f64::from(MIN_GAP));
     }
     if center.y < original.y1 || (k_is_zone && moved.y1 < original.y1) {
-        grown.y1 = grown.y1.min(moved.y1 - f64::from(MIN_GAP));
+        grown.y1 = grown
+            .y1
+            .min(moved.y1 - f64::from(MIN_GAP) - title_extra(parent));
     }
     if center.y > original.y2 || (k_is_zone && moved.y2 > original.y2) {
         grown.y2 = grown.y2.max(moved.y2 + f64::from(MIN_GAP));
     }
 }
 
-fn grow_zone_edge(grown_q: &mut Rect, q_rect: Rect, grown_p: Rect) {
+fn grow_zone_edge(
+    grown_q: &mut Rect,
+    parent: &Container,
+    grown_q_before: &Rect,
+    grown_p: Rect,
+    original_p: Rect,
+    title_encroached: bool,
+) {
+    let q_rect = parent.rect;
     if grown_p.x1 < q_rect.x1 {
         grown_q.x1 = grown_q.x1.min(grown_p.x1 - f64::from(MIN_GAP));
     }
     if grown_p.x2 > q_rect.x2 {
         grown_q.x2 = grown_q.x2.max(grown_p.x2 + f64::from(MIN_GAP));
     }
-    if grown_p.y1 < q_rect.y1 {
-        grown_q.y1 = grown_q.y1.min(grown_p.y1 - f64::from(MIN_GAP));
+    let top_crossed = grown_p.y1 < q_rect.y1
+        || (grown_p.y1 < original_p.y1
+            && title_band_floor(parent, grown_q_before).is_some_and(|floor| grown_p.y1 < floor));
+    if top_crossed || title_encroached {
+        grown_q.y1 = grown_q
+            .y1
+            .min(grown_p.y1 - f64::from(MIN_GAP) - title_extra(parent));
     }
     if grown_p.y2 > q_rect.y2 {
         grown_q.y2 = grown_q.y2.max(grown_p.y2 + f64::from(MIN_GAP));
