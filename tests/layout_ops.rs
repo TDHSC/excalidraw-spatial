@@ -313,6 +313,30 @@ fn fit_container_swimlanes_lane_be_grows_around_children_and_title() {
 }
 
 #[test]
+fn fit_container_swimlanes_lane_be_expand_only_keeps_aligned_edges() {
+    // T18 without --expand-only still shrinks y/height (see test above). This flag
+    // unions the tight rect with the current rect so lane_be stays aligned with lane_fe.
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "fit-container",
+        &fixture("swimlanes"),
+        "--id",
+        "lane_be",
+        "--padding",
+        "40",
+        "--expand-only",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let out = parse_json(&stdout);
+
+    let lane_be = element(&out, "lane_be");
+    approx(num(lane_be, "x"), 440.0);
+    approx(num(lane_be, "y"), 0.0);
+    approx(num(lane_be, "width"), 460.0);
+    approx(num(lane_be, "height"), 300.0);
+}
+
+#[test]
 fn fit_container_icon_group_storage_uses_padding_without_title_inset() {
     let (code, stdout, stderr) = run_layout(&[
         "layout",

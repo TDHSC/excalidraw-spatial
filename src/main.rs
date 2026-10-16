@@ -186,7 +186,12 @@ fn layout_change(scene: &Scene, cmd: &LayoutCommands) -> anyhow::Result<Change> 
             *gap,
             place_align.clone(),
         ),
-        LayoutCommands::FitContainer { id, padding, .. } => fit_container(scene, id, *padding),
+        LayoutCommands::FitContainer {
+            id,
+            padding,
+            expand_only,
+            ..
+        } => fit_container(scene, id, *padding, *expand_only),
         LayoutCommands::FitText {
             id,
             all,

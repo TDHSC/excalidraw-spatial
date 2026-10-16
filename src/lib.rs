@@ -149,6 +149,8 @@ pub enum LayoutCommands {
         id: String,
         #[arg(long, allow_negative_numbers = true)]
         padding: Option<f64>,
+        #[arg(long)]
+        expand_only: bool,
         #[command(flatten)]
         output: OutputArgs,
     },

@@ -67,12 +67,18 @@ pub fn distribute(
     }
     let mut items = resolve_boxes(scene, ids)?;
     let horizontal = matches!(direction, Direction::Horizontal);
-    // Stable sort: equal leading edges keep input order.
+    // Stable sort by center then leading edge so fit-text widening cannot invert order.
     items.sort_by(|a, b| {
-        let key = |rect: Rect| if horizontal { rect.x1 } else { rect.y1 };
-        key(a.1)
-            .partial_cmp(&key(b.1))
-            .unwrap_or(std::cmp::Ordering::Equal)
+        let key = |rect: Rect| {
+            if horizontal {
+                (rect.center().x, rect.x1)
+            } else {
+                (rect.center().y, rect.y1)
+            }
+        };
+        let (ac, al) = key(a.1);
+        let (bc, bl) = key(b.1);
+        ac.total_cmp(&bc).then(al.total_cmp(&bl))
     });
 
     let explicit = gap.is_some();
@@ -209,7 +215,12 @@ fn resolve_box(scene: &Scene, id: &str) -> anyhow::Result<(String, Rect)> {
     Ok(resolved.into_iter().next().expect("one id"))
 }
 
-pub fn fit_container(scene: &Scene, id: &str, padding: Option<f64>) -> anyhow::Result<Change> {
+pub fn fit_container(
+    scene: &Scene,
+    id: &str,
+    padding: Option<f64>,
+    expand_only: bool,
+) -> anyhow::Result<Change> {
     let Target::Container(container_id) = scene.resolve(id)? else {
         anyhow::bail!("{id} is not a container");
     };
@@ -226,6 +237,9 @@ pub fn fit_container(scene: &Scene, id: &str, padding: Option<f64>) -> anyhow::R
     let mut new_rect = union.inflate(padding);
     if container.kind == ContainerKind::Zone && container.title_element.is_some() {
         new_rect.y1 -= container.title_height.unwrap_or(0.0) + 10.0;
+    }
+    if expand_only {
+        new_rect = container.rect.union(&new_rect);
     }
     Ok(Change {
         moves: vec![],
@@ -446,5 +460,49 @@ mod tests {
         let (dx, dy) = placed(&scene, None, Some("A"), PlaceAlign::End);
         // above, end aligns x2: A.x2 = 110, B.x2 = 250 => dx = -140; dy still -130
         assert_eq!((dx, dy), (-140.0, -130.0));
+    }
+
+    #[test]
+    fn distribute_horizontal_sorts_by_center_then_leading_edge() {
+        // A: x=40,w=140 → cx=110, x1=40. Widened B: x=30,w=340 → cx=200, x1=30.
+        // A leading-edge sort would put B first (x1=30) and move A; center order keeps A.
+        let (_doc, scene) = scene_of(
+            r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "A", "x": 40, "y": 100, "width": 140, "height": 80},
+    {"type": "rectangle", "id": "B", "x": 30, "y": 100, "width": 340, "height": 80}
+  ]
+}"#,
+        );
+        let change = distribute(
+            &scene,
+            &["A".to_string(), "B".to_string()],
+            Direction::Horizontal,
+            Some(40.0),
+        )
+        .expect("distribute");
+        let move_of = |id: &str| {
+            change
+                .moves
+                .iter()
+                .find(|(moved_id, _, _)| moved_id == id)
+                .map(|(_, dx, dy)| (*dx, *dy))
+        };
+        assert!(
+            move_of("A").is_none() || move_of("A") == Some((0.0, 0.0)),
+            "A must stay put, got {:?}",
+            change.moves
+        );
+        let (dx, dy) = move_of("B").expect("B should move");
+        assert!(
+            (dx - 190.0).abs() < 1e-6,
+            "B.x becomes 220, dx=190, got {dx}"
+        );
+        assert!(
+            (dy - 0.0).abs() < 1e-6,
+            "B must not move vertically, dy={dy}"
+        );
     }
 }

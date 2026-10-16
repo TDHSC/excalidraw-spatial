@@ -232,7 +232,20 @@ fn apply_resize(
                 reposition_bound_text(doc, title_id, &primary, &new_rect, elem_changed);
             } else if container.kind == ContainerKind::Zone {
                 let dx = new_rect.x1 - container.rect.x1;
-                let dy = new_rect.y1 - container.rect.y1;
+                let mut dy = new_rect.y1 - container.rect.y1;
+                let kids = crate::spatial::children(old_scene, id);
+                if !kids.is_empty() {
+                    if let Some(el) = doc.element(title_id) {
+                        let u_y1 = kids
+                            .iter()
+                            .map(|(_, rect)| rect.y1)
+                            .fold(f64::INFINITY, f64::min);
+                        let ceiling = (u_y1 - text_size(el).height - 6.0).max(new_rect.y1);
+                        if el.y() + dy > ceiling {
+                            dy = ceiling - el.y();
+                        }
+                    }
+                }
                 translate_element(doc, title_id, dx, dy, elem_changed);
             }
         }
@@ -346,6 +359,48 @@ mod tests {
             json_el(&doc, "arr")["points"],
             serde_json::json!([[0, 0], [44, 0], [44, 100], [88, 100]])
         );
+    }
+
+    #[test]
+    fn zone_free_title_clamps_above_children_on_resize() {
+        let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "z", "x": 0, "y": 0, "width": 400, "height": 300},
+    {"type": "text", "id": "t", "x": 16, "y": 22, "width": 80, "height": 25, "text": "Lane", "fontSize": 20, "lineHeight": 1.25},
+    {"type": "rectangle", "id": "c1", "x": 40, "y": 100, "width": 120, "height": 80},
+    {"type": "rectangle", "id": "c2", "x": 200, "y": 100, "width": 120, "height": 80}
+  ]
+}"#;
+        let mut doc = Document::parse(src).expect("parse");
+        let scene = Scene::build(&doc);
+        assert_eq!(
+            scene.containers.len(),
+            1,
+            "z must be a Zone: {:?}",
+            scene.containers.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
+        assert_eq!(scene.containers[0].id, "z");
+        assert_eq!(scene.containers[0].title_element.as_deref(), Some("t"));
+        let kids: Vec<_> = crate::spatial::children(&scene, "z")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(kids, vec!["c1".to_string(), "c2".to_string()]);
+
+        let change = super::ops::fit_container(&scene, "z", Some(10.0), false).expect("fit");
+        assert_eq!(change.resizes.len(), 1);
+        let (id, new_rect) = &change.resizes[0];
+        assert_eq!(id, "z");
+        approx(new_rect.y1, 55.0);
+
+        apply(&mut doc, &scene, &change).expect("apply");
+        approx(json_el(&doc, "t")["y"].as_f64().expect("t.y"), 69.0);
+        approx(json_el(&doc, "c1")["x"].as_f64().expect("c1.x"), 40.0);
+        approx(json_el(&doc, "c1")["y"].as_f64().expect("c1.y"), 100.0);
+        approx(json_el(&doc, "c2")["x"].as_f64().expect("c2.x"), 200.0);
+        approx(json_el(&doc, "c2")["y"].as_f64().expect("c2.y"), 100.0);
     }
 
     #[test]
