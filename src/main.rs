@@ -1,6 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
+use excalidraw_spatial::formatter::ai_report::format_inspect;
+use excalidraw_spatial::formatter::ascii_map::render;
 use excalidraw_spatial::formatter::{format_lint_json, format_lint_text};
 use excalidraw_spatial::linter::{run_lint, Severity};
 use excalidraw_spatial::mutator::ops::{
@@ -9,7 +11,9 @@ use excalidraw_spatial::mutator::ops::{
 use excalidraw_spatial::mutator::{apply, Change};
 use excalidraw_spatial::scene_graph::Scene;
 use excalidraw_spatial::schema::Document;
-use excalidraw_spatial::{not_implemented, Cli, Commands, LayoutCommands, LintFormat, OutputArgs};
+use excalidraw_spatial::{
+    not_implemented, Cli, Commands, InspectFormat, LayoutCommands, LintFormat, OutputArgs,
+};
 
 fn main() {
     let cli = Cli::parse();
@@ -19,10 +23,36 @@ fn main() {
             strict,
             format,
         } => lint_cmd(&file, strict, format),
-        Commands::Inspect { .. } => not_implemented(),
+        Commands::Inspect { file, format } => inspect_cmd(&file, format),
         Commands::Layout { command } => layout_cmd(command),
     };
     std::process::exit(code);
+}
+
+fn inspect_cmd(file: &str, format: InspectFormat) -> i32 {
+    if matches!(format, InspectFormat::Json) {
+        return not_implemented();
+    }
+    let doc = match Document::load(file) {
+        Ok(doc) => doc,
+        Err(e) => {
+            eprintln!("excal: error: {e}");
+            return 2;
+        }
+    };
+    let scene = Scene::build(&doc);
+    let title = if file == "-" { "<stdin>" } else { file };
+    let lint_file = if file == "-" { "<file>" } else { file };
+    let out = match format {
+        InspectFormat::Ai => {
+            let issues = run_lint(&scene, lint_file);
+            format_inspect(title, &scene, &issues)
+        }
+        InspectFormat::Ascii => render(&scene).join("\n") + "\n",
+        InspectFormat::Json => unreachable!(),
+    };
+    print!("{out}");
+    0
 }
 
 fn lint_cmd(file: &str, strict: bool, format: LintFormat) -> i32 {
