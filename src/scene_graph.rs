@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::geometry::{Point, Rect};
-use crate::linter::{LintIssue, SHAPE_TYPES};
+use crate::linter::{label_str, LintIssue, Severity, SHAPE_TYPES, ZONE_CHILD_AREA_RATIO};
 use crate::schema::{Document, RawElement};
 
 const NEAR_DIST: f64 = 12.0;
@@ -102,6 +102,7 @@ impl Scene {
         let mut shape_labels: HashMap<String, ShapeLabel> = HashMap::new();
         let mut arrow_labels: HashMap<String, ArrowLabel> = HashMap::new();
         let mut claimed: HashSet<String> = HashSet::new();
+        let mut arrow_label_ids: HashSet<String> = HashSet::new();
         for el in &elements {
             if el.element_type != "text" {
                 continue;
@@ -114,6 +115,7 @@ impl Scene {
             };
             claimed.insert(el.id.clone());
             if is_connector_type(&host.element_type) {
+                arrow_label_ids.insert(el.id.clone());
                 arrow_labels.insert(
                     container_id.to_string(),
                     ArrowLabel {
@@ -133,11 +135,84 @@ impl Scene {
             }
         }
 
-        // Grouping, zones, free-text absorption, and frames arrive in later tickets.
-        // Elements with groupIds are treated as ungrouped until then.
+        let mut members_by_group: HashMap<&str, Vec<&RawElement>> = HashMap::new();
+        for el in &elements {
+            if matches!(el.element_type.as_str(), "arrow" | "frame" | "magicframe")
+                || arrow_label_ids.contains(&el.id)
+            {
+                continue;
+            }
+            let Some(group_id) = el.outer_group() else {
+                continue;
+            };
+            members_by_group.entry(group_id).or_default().push(*el);
+        }
+
+        let mut atomic_groups: Vec<(&str, Vec<&RawElement>)> = Vec::new();
+        let mut atomic_member_ids: HashSet<String> = HashSet::new();
+        for (group_id, members) in members_by_group {
+            if group_should_dissolve(&members) {
+                continue;
+            }
+            for member in &members {
+                atomic_member_ids.insert(member.id.clone());
+            }
+            atomic_groups.push((group_id, members));
+        }
+
         let mut components = Vec::new();
+        for (group_id, members) in atomic_groups {
+            let mut member_ids: Vec<String> =
+                members.iter().map(|member| member.id.clone()).collect();
+            let member_id_set: HashSet<&str> =
+                members.iter().map(|member| member.id.as_str()).collect();
+            for member in &members {
+                if let Some(label) = shape_labels.get(&member.id) {
+                    if !member_id_set.contains(label.element_id.as_str()) {
+                        member_ids.push(label.element_id.clone());
+                    }
+                }
+                claimed.insert(member.id.clone());
+            }
+
+            let mut rect = members[0].rect();
+            let mut z = members[0].z;
+            let mut frame_id = None;
+            let mut texts = Vec::new();
+            for member in &members {
+                rect = rect.union(&member.rect());
+                z = z.min(member.z);
+                if frame_id.is_none() {
+                    frame_id = non_empty(member.frame_id.as_deref());
+                }
+                if member.element_type == "text" {
+                    texts.push(member.text.clone().unwrap_or_default());
+                }
+            }
+
+            components.push(Component {
+                id: format!("group:{group_id}"),
+                kind: ComponentKind::Group,
+                type_name: "group".to_string(),
+                rect,
+                label: if texts.is_empty() {
+                    None
+                } else {
+                    Some(texts.join(" "))
+                },
+                label_element: None,
+                elements: member_ids,
+                parent: None,
+                frame_id,
+                z,
+            });
+        }
+
         for el in &elements {
             if !SHAPE_TYPES.contains(&el.element_type.as_str()) {
+                continue;
+            }
+            if atomic_member_ids.contains(&el.id) {
                 continue;
             }
             let label = shape_labels.remove(&el.id);
@@ -157,6 +232,60 @@ impl Scene {
                 frame_id: non_empty(el.frame_id.as_deref()),
                 z: el.z,
             });
+        }
+
+        let mut notes = Vec::new();
+        for el in &elements {
+            if el.element_type != "text" || claimed.contains(&el.id) {
+                continue;
+            }
+            let text_rect = el.rect();
+            let text_area = text_rect.area();
+            let text_center = text_rect.center();
+            // Equal-area hosts: keep the first Shape in current component order
+            // (document/z order for shapes created above).
+            let mut best: Option<usize> = None;
+            let mut best_area = f64::INFINITY;
+            for (index, component) in components.iter().enumerate() {
+                if component.kind != ComponentKind::Shape {
+                    continue;
+                }
+                let host_area = component.rect.area();
+                if host_area > text_area
+                    && component.rect.contains_point(text_center)
+                    && host_area < best_area
+                {
+                    best = Some(index);
+                    best_area = host_area;
+                }
+            }
+            let Some(index) = best else {
+                continue;
+            };
+            let host = &mut components[index];
+            host.elements.push(el.id.clone());
+            if host.label.is_none() {
+                let text = el.text.clone().unwrap_or_default();
+                notes.push(LintIssue {
+                    rule: "UNBOUND_TEXT",
+                    severity: Severity::Info,
+                    targets: vec![el.id.clone(), host.id.clone()],
+                    message: format!(
+                        "text {} \"{}\" sits inside {} but is not bound to it",
+                        el.id,
+                        label_str(&text),
+                        host.id
+                    ),
+                    fix: Some(format!(
+                        "bind it as the label of {} (set containerId)",
+                        host.id
+                    )),
+                    command: None,
+                });
+                host.label = Some(text);
+                host.label_element = Some(el.id.clone());
+            }
+            claimed.insert(el.id.clone());
         }
 
         for el in &elements {
@@ -187,7 +316,9 @@ impl Scene {
 
         let mut connectors = Vec::new();
         for el in &elements {
-            if !is_connector_type(&el.element_type) {
+            if el.element_type != "arrow"
+                && (el.element_type != "line" || atomic_member_ids.contains(&el.id))
+            {
                 continue;
             }
             let points = el.abs_points();
@@ -227,7 +358,7 @@ impl Scene {
             components,
             containers,
             connectors,
-            notes: Vec::new(),
+            notes,
         }
     }
 
@@ -282,6 +413,28 @@ fn is_connector_type(element_type: &str) -> bool {
 
 fn non_empty(value: Option<&str>) -> Option<String> {
     value.filter(|value| !value.is_empty()).map(str::to_string)
+}
+
+fn group_should_dissolve(members: &[&RawElement]) -> bool {
+    for rectangle in members {
+        if rectangle.element_type != "rectangle" {
+            continue;
+        }
+        let rect = rectangle.rect();
+        let child_limit = ZONE_CHILD_AREA_RATIO * rect.area();
+        let nested = members
+            .iter()
+            .filter(|member| member.id != rectangle.id)
+            .filter(|member| SHAPE_TYPES.contains(&member.element_type.as_str()))
+            .filter(|member| member.z > rectangle.z)
+            .filter(|member| rect.contains_point(member.rect().center()))
+            .filter(|member| member.rect().area() <= child_limit)
+            .count();
+        if nested >= 2 {
+            return true;
+        }
+    }
+    false
 }
 
 fn owner_index<'a>(
