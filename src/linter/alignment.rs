@@ -1,9 +1,11 @@
+use std::collections::HashSet;
+
 use crate::geometry::fmt_px;
 use crate::linter::{
     disp, text_factor, LintIssue, Severity, NEAR_MISS_MAX, TEXT_PAD_X, TEXT_PAD_Y, TEXT_SHAPES,
     TIGHT_GAP, UNEVEN_DIFF,
 };
-use crate::scene_graph::{Component, ComponentKind, Scene};
+use crate::scene_graph::{Attach, Component, ComponentKind, Scene};
 use crate::spatial::{self, Track};
 
 pub fn text_overflow(scene: &Scene, file: &str) -> Vec<LintIssue> {
@@ -52,7 +54,54 @@ pub fn near_miss_alignment(scene: &Scene, file: &str) -> Vec<LintIssue> {
             emit_near_miss(scene, file, &track, false, &mut issues);
         }
     }
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    for connector in &scene.connectors {
+        let Some(start_id) = attach_target(&connector.start) else {
+            continue;
+        };
+        let Some(end_id) = attach_target(&connector.end) else {
+            continue;
+        };
+        let Some(a) = scene.component(start_id) else {
+            continue;
+        };
+        let Some(b) = scene.component(end_id) else {
+            continue;
+        };
+        if a.kind != ComponentKind::Shape && a.kind != ComponentKind::Group {
+            continue;
+        }
+        if b.kind != ComponentKind::Shape && b.kind != ComponentKind::Group {
+            continue;
+        }
+        let key = if a.id <= b.id {
+            (a.id.clone(), b.id.clone())
+        } else {
+            (b.id.clone(), a.id.clone())
+        };
+        if !seen.insert(key) {
+            continue;
+        }
+        if a.parent.is_none() || b.parent.is_none() || a.parent == b.parent {
+            continue;
+        }
+        let x_overlap = a.rect.x2.min(b.rect.x2) - a.rect.x1.max(b.rect.x1);
+        let y_overlap = a.rect.y2.min(b.rect.y2) - a.rect.y1.max(b.rect.y1);
+        let row = y_overlap > 0.0 && x_overlap <= 0.0;
+        let col = x_overlap > 0.0 && y_overlap <= 0.0;
+        if !row && !col {
+            continue;
+        }
+        emit_near_miss_pair(file, a, b, row, &mut issues);
+    }
     issues
+}
+
+fn attach_target(attach: &Attach) -> Option<&str> {
+    match attach {
+        Attach::Bound { target, .. } | Attach::Near { target, .. } => Some(target.as_str()),
+        Attach::Free => None,
+    }
 }
 
 pub fn uneven_spacing(scene: &Scene, file: &str) -> Vec<LintIssue> {
@@ -102,46 +151,56 @@ fn emit_near_miss(
         let Some(b) = scene.component(&pair[1]) else {
             continue;
         };
-        let ds: [(&str, f64); 3] = if row {
-            [
-                ("middle", (a.rect.center().y - b.rect.center().y).abs()),
-                ("top", (a.rect.y1 - b.rect.y1).abs()),
-                ("bottom", (a.rect.y2 - b.rect.y2).abs()),
-            ]
-        } else {
-            [
-                ("center", (a.rect.center().x - b.rect.center().x).abs()),
-                ("left", (a.rect.x1 - b.rect.x1).abs()),
-                ("right", (a.rect.x2 - b.rect.x2).abs()),
-            ]
-        };
-        if ds.iter().any(|(_, d)| *d < 0.5) {
-            continue;
-        }
-        let (axis, d) = ds
-            .into_iter()
-            .min_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal))
-            .expect("three deltas");
-        if !(1.0 <= d && d <= f64::from(NEAR_MISS_MAX)) {
-            continue;
-        }
-        issues.push(LintIssue {
-            rule: "NEAR_MISS_ALIGNMENT",
-            severity: Severity::Warn,
-            targets: vec![a.id.clone(), b.id.clone()],
-            message: format!(
-                "{} and {} are misaligned by {}px ({axis})",
-                disp(&a.id, a.label.as_deref()),
-                disp(&b.id, b.label.as_deref()),
-                fmt_px(d)
-            ),
-            fix: Some(format!("align {} to {} ({axis})", b.id, a.id)),
-            command: Some(format!(
-                "excal layout align {file} --ids {},{} --axis {axis}",
-                a.id, b.id
-            )),
-        });
+        emit_near_miss_pair(file, a, b, row, issues);
     }
+}
+
+fn emit_near_miss_pair(
+    file: &str,
+    a: &Component,
+    b: &Component,
+    row: bool,
+    issues: &mut Vec<LintIssue>,
+) {
+    let ds: [(&str, f64); 3] = if row {
+        [
+            ("middle", (a.rect.center().y - b.rect.center().y).abs()),
+            ("top", (a.rect.y1 - b.rect.y1).abs()),
+            ("bottom", (a.rect.y2 - b.rect.y2).abs()),
+        ]
+    } else {
+        [
+            ("center", (a.rect.center().x - b.rect.center().x).abs()),
+            ("left", (a.rect.x1 - b.rect.x1).abs()),
+            ("right", (a.rect.x2 - b.rect.x2).abs()),
+        ]
+    };
+    if ds.iter().any(|(_, d)| *d < 0.5) {
+        return;
+    }
+    let (axis, d) = ds
+        .into_iter()
+        .min_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal))
+        .expect("three deltas");
+    if !(1.0 <= d && d <= f64::from(NEAR_MISS_MAX)) {
+        return;
+    }
+    issues.push(LintIssue {
+        rule: "NEAR_MISS_ALIGNMENT",
+        severity: Severity::Warn,
+        targets: vec![a.id.clone(), b.id.clone()],
+        message: format!(
+            "{} and {} are misaligned by {}px ({axis})",
+            disp(&a.id, a.label.as_deref()),
+            disp(&b.id, b.label.as_deref()),
+            fmt_px(d)
+        ),
+        fix: Some(format!("align {} to {} ({axis})", b.id, a.id)),
+        command: Some(format!(
+            "excal layout align {file} --ids {},{} --axis {axis}",
+            a.id, b.id
+        )),
+    });
 }
 
 fn emit_uneven(file: &str, tracks: &[Track], direction: &str, issues: &mut Vec<LintIssue>) {

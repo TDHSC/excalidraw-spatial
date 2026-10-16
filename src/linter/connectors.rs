@@ -22,14 +22,35 @@ pub fn arrow_crossing_node(scene: &Scene) -> Vec<LintIssue> {
             continue;
         }
         for n in scene.nodes() {
-            if Some(n.id.as_str()) == s || Some(n.id.as_str()) == e {
-                continue;
-            }
-            if n.rect.contains_point(first) || n.rect.contains_point(last) {
+            let is_endpoint = Some(n.id.as_str()) == s
+                || Some(n.id.as_str()) == e
+                || n.rect.contains_point(first)
+                || n.rect.contains_point(last);
+            if arrow.points.len() < 3 && is_endpoint {
                 continue;
             }
             let inflated = n.rect.inflate(-2.0);
-            for i in 0..arrow.points.len() - 1 {
+            let len = arrow.points.len();
+            let (seg_start, seg_end) = if is_endpoint && len >= 3 {
+                let mut lead = 0;
+                while lead < len - 1 && inflated.contains_point(arrow.points[lead]) {
+                    lead += 1;
+                }
+                if n.rect.contains_point(first) {
+                    lead = lead.max(1);
+                }
+                let mut trail = len - 1;
+                while trail > 0 && inflated.contains_point(arrow.points[trail]) {
+                    trail -= 1;
+                }
+                if n.rect.contains_point(last) {
+                    trail = trail.min(len - 2);
+                }
+                (lead, trail)
+            } else {
+                (0, len - 1)
+            };
+            for i in seg_start..seg_end {
                 let p0 = arrow.points[i];
                 let p1 = arrow.points[i + 1];
                 if clip_segment(p0, p1, &inflated).is_none() {
@@ -104,7 +125,21 @@ pub fn arrow_label_collision(scene: &Scene, file: &str) -> Vec<LintIssue> {
                     if let (Some(&sp), Some(&ep), Some(end_target)) =
                         (arrow.points.first(), arrow.points.last(), e)
                     {
-                        lengthen_fix(file, end_target, sp, ep, dx, dy)
+                        let s_rect = s.and_then(|id| scene.rect_of(id));
+                        let e_rect = e.and_then(|id| scene.rect_of(id));
+                        let (start_pt, end_pt) = match (s_rect, e_rect) {
+                            (Some(sr), Some(er)) => {
+                                let sc = sr.center();
+                                let ec = er.center();
+                                if sc.x == ec.x && sc.y == ec.y {
+                                    (sp, ep)
+                                } else {
+                                    (sc, ec)
+                                }
+                            }
+                            _ => (sp, ep),
+                        };
+                        lengthen_fix(file, end_target, start_pt, end_pt, dx, dy)
                     } else {
                         (format!("move the label or {}", x.id), None)
                     }

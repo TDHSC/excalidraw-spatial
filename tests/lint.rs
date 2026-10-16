@@ -31,6 +31,49 @@ fn cleanup(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
+fn make_temp_dir(tag: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let dir =
+        std::env::temp_dir().join(format!("excal-t24-{}-{}-{tag}", std::process::id(), nanos));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    dir
+}
+
+fn run_in(dir: &Path, args: &[&str]) -> (i32, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_excal"))
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("failed to execute excal");
+    let code = output.status.code().expect("process terminated by signal");
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf-8");
+    (code, stdout, stderr)
+}
+
+fn lint_json_in(dir: &Path) -> serde_json::Value {
+    let (code, stdout, stderr) = run_in(dir, &["lint", "f.excalidraw", "--format", "json"]);
+    assert!(
+        code == 0 || code == 1,
+        "lint should parse the fixture; code={code} stdout={stdout} stderr={stderr}"
+    );
+    serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("lint json parse failed: {e}; code={code} stdout={stdout} stderr={stderr}")
+    })
+}
+
+fn issues_with_rule<'a>(v: &'a serde_json::Value, rule: &str) -> Vec<&'a serde_json::Value> {
+    v["issues"]
+        .as_array()
+        .expect("issues array")
+        .iter()
+        .filter(|issue| issue["rule"] == rule)
+        .collect()
+}
+
 #[test]
 fn lint_overlap_matches_golden_and_exits_1() {
     let (code, stdout, _stderr) = run(&["lint", "tests/fixtures/overlap.excalidraw"]);
@@ -333,5 +376,212 @@ fn corner_badge_inside_usable_inner_box_does_not_overflow() {
     assert!(
         issues.iter().all(|issue| issue.rule != "TEXT_OVERFLOW"),
         "corner badge should not overflow: {issues:?}"
+    );
+}
+
+#[test]
+fn b06_sibling_zones_emit_overlap_component() {
+    let dir = make_temp_dir("b06-zones");
+    let path = dir.join("f.excalidraw");
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "lane_fe", "x": 0, "y": 35, "width": 460, "height": 195},
+    {"type": "text", "id": "fe_title", "x": 16, "y": 40, "width": 80, "height": 20, "text": "Frontend", "fontSize": 16, "textAlign": "left"},
+    {"type": "rectangle", "id": "fe_child", "x": 40, "y": 90, "width": 80, "height": 40},
+    {"type": "rectangle", "id": "lane_be", "x": 440, "y": 0, "width": 400, "height": 300},
+    {"type": "text", "id": "be_title", "x": 456, "y": 8, "width": 80, "height": 20, "text": "Backend", "fontSize": 16, "textAlign": "left"},
+    {"type": "rectangle", "id": "be_child", "x": 500, "y": 80, "width": 80, "height": 40}
+  ]
+}"#;
+    fs::write(&path, src).expect("write temp lint file");
+    let v = lint_json_in(&dir);
+    let _ = fs::remove_dir_all(&dir);
+    let hits: Vec<_> = issues_with_rule(&v, "OVERLAP_COMPONENT")
+        .into_iter()
+        .filter(|issue| {
+            issue["message"] == r#"lane_fe "Frontend" overlaps lane_be "Backend" by 20x195px"#
+                && issue["command"] == "excal layout move f.excalidraw --id lane_be --dx 60"
+        })
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected OVERLAP_COMPONENT for sibling zones, got {}",
+        serde_json::to_string_pretty(&v["issues"]).unwrap()
+    );
+    assert_eq!(hits[0]["severity"], "error");
+    assert_eq!(
+        hits[0]["targets"],
+        serde_json::json!(["lane_fe", "lane_be"])
+    );
+    assert_eq!(
+        hits[0]["fix"],
+        "move lane_be right by 60px to leave a 40px gap"
+    );
+}
+
+#[test]
+fn b06_external_node_intruding_into_container() {
+    let dir = make_temp_dir("b06-ext");
+    let path = dir.join("f.excalidraw");
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "lane_be", "x": 440, "y": 0, "width": 400, "height": 300},
+    {"type": "rectangle", "id": "c1", "x": 480, "y": 110, "width": 80, "height": 40},
+    {"type": "rectangle", "id": "c2", "x": 600, "y": 110, "width": 80, "height": 40},
+    {"type": "rectangle", "id": "ext", "x": 380, "y": 110, "width": 100, "height": 80}
+  ]
+}"#;
+    fs::write(&path, src).expect("write temp lint file");
+    let v = lint_json_in(&dir);
+    let _ = fs::remove_dir_all(&dir);
+    let hits: Vec<_> = issues_with_rule(&v, "OVERLAP_COMPONENT")
+        .into_iter()
+        .filter(|issue| issue["targets"] == serde_json::json!(["lane_be", "ext"]))
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected OVERLAP_COMPONENT targeting lane_be,ext, got {}",
+        serde_json::to_string_pretty(&v["issues"]).unwrap()
+    );
+    assert_eq!(hits[0]["severity"], "error");
+    assert_eq!(hits[0]["fix"], "move ext left by 80px to leave a 40px gap");
+    assert_eq!(
+        hits[0]["command"],
+        "excal layout move f.excalidraw --id ext --dx -80"
+    );
+}
+
+#[test]
+fn b09b_elbow_arrow_crosses_own_endpoints() {
+    let dir = make_temp_dir("b09b");
+    let path = dir.join("f.excalidraw");
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "A", "x": 100, "y": 100, "width": 140, "height": 80},
+    {"type": "rectangle", "id": "B", "x": 100, "y": 220, "width": 140, "height": 80},
+    {
+      "type": "arrow",
+      "id": "arr",
+      "x": 246,
+      "y": 140,
+      "width": 152,
+      "height": 120,
+      "points": [[0, 0], [-76, 0], [-76, 120], [-152, 120]],
+      "startBinding": {"elementId": "A"},
+      "endBinding": {"elementId": "B"}
+    }
+  ]
+}"#;
+    fs::write(&path, src).expect("write temp lint file");
+    let v = lint_json_in(&dir);
+    let _ = fs::remove_dir_all(&dir);
+    let hits = issues_with_rule(&v, "ARROW_CROSSING_NODE");
+    let pairs: Vec<_> = hits.iter().map(|issue| &issue["targets"]).collect();
+    assert!(
+        pairs.iter().any(|t| **t == serde_json::json!(["arr", "A"])),
+        "missing targets [arr, A]: {}",
+        serde_json::to_string_pretty(&v["issues"]).unwrap()
+    );
+    assert!(
+        pairs.iter().any(|t| **t == serde_json::json!(["arr", "B"])),
+        "missing targets [arr, B]: {}",
+        serde_json::to_string_pretty(&v["issues"]).unwrap()
+    );
+    assert!(hits.iter().all(|issue| issue["severity"] == "error"));
+}
+
+#[test]
+fn b12b_inverted_arrow_label_collision_uses_positive_dx() {
+    let dir = make_temp_dir("b12b");
+    let path = dir.join("f.excalidraw");
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "fetcher", "x": 331, "y": 65, "width": 175, "height": 75},
+    {"type": "rectangle", "id": "parser", "x": 510, "y": 65, "width": 175, "height": 75},
+    {
+      "type": "arrow",
+      "id": "a_fp",
+      "x": 512,
+      "y": 102,
+      "width": 8,
+      "height": 0,
+      "points": [[0, 0], [-8, 0]],
+      "startBinding": {"elementId": "fetcher"},
+      "endBinding": {"elementId": "parser"}
+    },
+    {
+      "type": "text",
+      "id": "lbl",
+      "x": 469.6,
+      "y": 92,
+      "width": 76.8,
+      "height": 20,
+      "text": "raw HTML",
+      "fontSize": 16,
+      "containerId": "a_fp"
+    }
+  ]
+}"#;
+    fs::write(&path, src).expect("write temp lint file");
+    let v = lint_json_in(&dir);
+    let _ = fs::remove_dir_all(&dir);
+    let hits = issues_with_rule(&v, "ARROW_LABEL_COLLISION");
+    assert!(
+        hits.iter()
+            .any(|issue| issue["command"] == "excal layout move f.excalidraw --id parser --dx 93"),
+        "expected positive --dx 93 command, got {}",
+        serde_json::to_string_pretty(&v["issues"]).unwrap()
+    );
+}
+
+#[test]
+fn b15c_cross_swimlane_near_miss_alignment() {
+    let dir = make_temp_dir("b15c");
+    let path = dir.join("f.excalidraw");
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "z1", "x": 0, "y": 0, "width": 300, "height": 300},
+    {"type": "text", "id": "z1_title", "x": 8, "y": 8, "width": 40, "height": 20, "text": "Z1", "fontSize": 16, "textAlign": "left"},
+    {"type": "rectangle", "id": "a", "x": 40, "y": 100, "width": 140, "height": 80},
+    {"type": "rectangle", "id": "z2", "x": 400, "y": 0, "width": 300, "height": 300},
+    {"type": "text", "id": "z2_title", "x": 408, "y": 8, "width": 40, "height": 20, "text": "Z2", "fontSize": 16, "textAlign": "left"},
+    {"type": "rectangle", "id": "b", "x": 480, "y": 105, "width": 140, "height": 80},
+    {
+      "type": "arrow",
+      "id": "arr",
+      "x": 186,
+      "y": 140,
+      "width": 288,
+      "height": 5,
+      "points": [[0, 0], [288, 5]],
+      "startBinding": {"elementId": "a"},
+      "endBinding": {"elementId": "b"}
+    }
+  ]
+}"#;
+    fs::write(&path, src).expect("write temp lint file");
+    let v = lint_json_in(&dir);
+    let _ = fs::remove_dir_all(&dir);
+    let hits: Vec<_> = issues_with_rule(&v, "NEAR_MISS_ALIGNMENT")
+        .into_iter()
+        .filter(|issue| issue["message"] == "a and b are misaligned by 5px (middle)")
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected NEAR_MISS_ALIGNMENT for a and b, got {}",
+        serde_json::to_string_pretty(&v["issues"]).unwrap()
     );
 }
