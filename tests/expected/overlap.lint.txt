@@ -1,0 +1,4 @@
+ERROR OVERLAP_COMPONENT api "API" overlaps auth "Auth" by 24x60px
+      fix: move auth right by 64px to leave a 40px gap
+      run: excal layout move tests/fixtures/overlap.excalidraw --id auth --dx 64
+errors: 1, warnings: 0, info: 0

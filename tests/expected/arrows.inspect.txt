@@ -1,0 +1,56 @@
+# excal inspect tests/fixtures/arrows.excalidraw
+canvas x0..580 y100..380 | components: 4, containers: 0, connectors: 4 | errors: 3, warnings: 1, info: 1
+
+## Containers
+(none)
+
+## Components
+- a "Gateway" rectangle x0..140 y100..180 c(70,140) parent=- L=- R=b(80) T=- B=-
+- b "Auth" rectangle x220..360 y100..180 c(290,140) parent=- L=a(80) R=c(80) T=- B=-
+- c "Orders" rectangle x440..580 y100..180 c(510,140) parent=- L=b(80) R=- T=- B=d(120)
+- d "Redis" rectangle x440..580 y300..380 c(510,340) parent=- L=- R=- T=c(120) B=-
+
+## Rows
+- top y≈140: a --80-- b --80-- c
+
+## Columns
+- top x≈510: c --120-- d
+
+## Connections
+- arr_cross a -> c straight (146,120) -> (434,120)
+- arr_label b -> c "validateToken()" straight (366,160) -> (434,160)
+- arr_dangling c -> free straight (510,186) -> (510,260)
+- arr_near b -> near:d(8px) elbow (290,186) -> (290,340) -> (432,340)
+
+## Minimap
+AAAAAAAAAAAAAAAA        BBBBBBBBBBBBBBBB        CCCCCCCCCCCCCCCC
+AAAAAAAAAAAAAAAA********BBBBBBBBBBBBBBBB********CCCCCCCCCCCCCCCC
+AAAAAAAAAAAAAAAA        BBBBBBBBBBBBBBBB        CCCCCCCCCCCCCCCC
+AAAAAAAAAAAAAAAA        BBBBBBBBBBBBBBBB********CCCCCCCCCCCCCCCC
+AAAAAAAAAAAAAAAA        BBBBBBBBBBBBBBBB        CCCCCCCCCCCCCCCC
+                                *                       *
+                                *                       *
+                                *                       *
+                                *                       *
+                                *
+                                *
+                                *               DDDDDDDDDDDDDDDD
+                                *               DDDDDDDDDDDDDDDD
+                                ****************DDDDDDDDDDDDDDDD
+                                                DDDDDDDDDDDDDDDD
+                                                DDDDDDDDDDDDDDDD
+A=a B=b C=c D=d
+
+## Issues
+ERROR ARROW_CROSSING_NODE arrow arr_cross (a -> c) crosses b "Auth" at segment (146,120)->(434,120)
+      fix: reroute around b: e.g. via y=60 (above) or y=220 (below)
+ERROR ARROW_LABEL_COLLISION label "validateToken()" of arrow arr_label overlaps b "Auth" by 22x20px
+      fix: lengthen the arrow: move c by 65px along x
+      run: excal layout move tests/fixtures/arrows.excalidraw --id c --dx 65
+ERROR ARROW_LABEL_COLLISION label "validateToken()" of arrow arr_label overlaps c "Orders" by 22x20px
+      fix: lengthen the arrow: move c by 65px along x
+      run: excal layout move tests/fixtures/arrows.excalidraw --id c --dx 65
+WARN  DANGLING_ARROW arrow arr_dangling end point (510,260) is not connected (nearest d is 40px away)
+      fix: extend the end point to (510,300) on d and bind it
+INFO  DANGLING_ARROW arrow arr_near end point touches d (8px) but is not bound; it will not follow d when moved in Excalidraw
+      fix: bind the end of arr_near to d

@@ -1,0 +1,15 @@
+WARN  TEXT_OVERFLOW label of n3 "Notification Service" needs 208x25px but the rectangle is 100x80px
+      fix: grow n3 to fit its label
+      run: excal layout fit-text tests/fixtures/text_layout.excalidraw --id n3
+WARN  NEAR_MISS_ALIGNMENT n1 "Client" and n2 "Load Balancer" are misaligned by 5px (middle)
+      fix: align n2 to n1 (middle)
+      run: excal layout align tests/fixtures/text_layout.excalidraw --ids n1,n2 --axis middle
+WARN  NEAR_MISS_ALIGNMENT n2 "Load Balancer" and n3 "Notification Service" are misaligned by 5px (middle)
+      fix: align n3 to n2 (middle)
+      run: excal layout align tests/fixtures/text_layout.excalidraw --ids n2,n3 --axis middle
+INFO  UNEVEN_SPACING horizontal sequence [n1,n2,n3] has uneven gaps [60, 20]px
+      fix: space them evenly with a 60px gap
+      run: excal layout distribute tests/fixtures/text_layout.excalidraw --ids n1,n2,n3 --direction horizontal --gap 60
+INFO  UNBOUND_TEXT text n4-text "缓存 Cache" sits inside n4 but is not bound to it
+      fix: bind it as the label of n4 (set containerId)
+errors: 0, warnings: 3, info: 2

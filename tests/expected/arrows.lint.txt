@@ -1,0 +1,13 @@
+ERROR ARROW_CROSSING_NODE arrow arr_cross (a -> c) crosses b "Auth" at segment (146,120)->(434,120)
+      fix: reroute around b: e.g. via y=60 (above) or y=220 (below)
+ERROR ARROW_LABEL_COLLISION label "validateToken()" of arrow arr_label overlaps b "Auth" by 22x20px
+      fix: lengthen the arrow: move c by 65px along x
+      run: excal layout move tests/fixtures/arrows.excalidraw --id c --dx 65
+ERROR ARROW_LABEL_COLLISION label "validateToken()" of arrow arr_label overlaps c "Orders" by 22x20px
+      fix: lengthen the arrow: move c by 65px along x
+      run: excal layout move tests/fixtures/arrows.excalidraw --id c --dx 65
+WARN  DANGLING_ARROW arrow arr_dangling end point (510,260) is not connected (nearest d is 40px away)
+      fix: extend the end point to (510,300) on d and bind it
+INFO  DANGLING_ARROW arrow arr_near end point touches d (8px) but is not bound; it will not follow d when moved in Excalidraw
+      fix: bind the end of arr_near to d
+errors: 3, warnings: 1, info: 1

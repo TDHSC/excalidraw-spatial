@@ -1,0 +1,42 @@
+# excal inspect tests/fixtures/swimlanes.excalidraw
+canvas x0..860 y0..300 | components: 4, containers: 2, connectors: 1 | errors: 1, warnings: 0, info: 0
+
+## Containers
+- lane_fe zone "Frontend" x0..400 y0..300 parent=- padding T110 R40 B110 L40 children=[web, mobile]
+- lane_be zone "Backend" x440..840 y0..300 parent=- padding T110 R-20 B110 L40 children=[api, db]
+
+## Components
+- web "Web App" rectangle x40..180 y110..190 c(110,150) parent=lane_fe L=- R=mobile(40) T=- B=-
+- mobile "Mobile" rectangle x220..360 y110..190 c(290,150) parent=lane_fe L=web(40) R=- T=- B=-
+- api "API" rectangle x480..620 y110..190 c(550,150) parent=lane_be L=- R=db(100) T=- B=-
+- db "Database" rectangle x720..860 y110..190 c(790,150) parent=lane_be L=api(100) R=- T=- B=-
+
+## Rows
+- lane_fe y≈150: web --40-- mobile
+- lane_be y≈150: api --100-- db
+
+## Columns
+(none)
+
+## Connections
+- mob_api mobile -> api straight (366,150) -> (474,150)
+
+## Minimap
+..............................  ...............................
+.                            .  .                             .
+.                            .  .                             .
+.                            .  .                             .
+. AAAAAAAAAAAA  BBBBBBBBBBB  .  .  CCCCCCCCCCCC      DDDDDDDDDDD
+. AAAAAAAAAAAA  BBBBBBBBBBB********CCCCCCCCCCCC      DDDDDDDDDDD
+. AAAAAAAAAAAA  BBBBBBBBBBB  .  .  CCCCCCCCCCCC      DDDDDDDDDDD
+. AAAAAAAAAAAA  BBBBBBBBBBB  .  .  CCCCCCCCCCCC      DDDDDDDDDDD
+.                            .  .                             .
+.                            .  .                             .
+.                            .  .                             .
+..............................  ...............................
+A=web B=mobile C=api D=db
+
+## Issues
+ERROR CONTAINER_OVERFLOW db "Database" extends 20px outside the right edge of lane_be "Backend"
+      fix: grow lane_be or move db inside it
+      run: excal layout fit-container tests/fixtures/swimlanes.excalidraw --id lane_be --padding 40

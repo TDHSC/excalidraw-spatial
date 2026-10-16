@@ -1,0 +1,4 @@
+ERROR CONTAINER_OVERFLOW db "Database" extends 20px outside the right edge of lane_be "Backend"
+      fix: grow lane_be or move db inside it
+      run: excal layout fit-container tests/fixtures/swimlanes.excalidraw --id lane_be --padding 40
+errors: 1, warnings: 0, info: 0

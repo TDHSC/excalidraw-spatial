@@ -1,0 +1,30 @@
+# excal inspect tests/fixtures/basic_flow.excalidraw
+canvas x100..780 y100..180 | components: 3, containers: 0, connectors: 2 | errors: 0, warnings: 0, info: 0
+
+## Containers
+(none)
+
+## Components
+- client "Client" rectangle x100..260 y100..180 c(180,140) parent=- L=- R=api(100) T=- B=-
+- api "API Gateway" rectangle x360..520 y100..180 c(440,140) parent=- L=client(100) R=svc(100) T=- B=-
+- svc "Order Service" rectangle x620..780 y100..180 c(700,140) parent=- L=api(100) R=- T=- B=-
+
+## Rows
+- top y≈140: client --100-- api --100-- svc
+
+## Columns
+(none)
+
+## Connections
+- a1 client -> api "HTTPS" straight (266,140) -> (354,140)
+- a2 api -> svc "gRPC" straight (526,140) -> (614,140)
+
+## Minimap
+AAAAAAAAAAAAAAAA        BBBBBBBBBBBBBBBB        CCCCCCCCCCCCCCCC
+AAAAAAAAAAAAAAAA********BBBBBBBBBBBBBBBB********CCCCCCCCCCCCCCCC
+AAAAAAAAAAAAAAAA        BBBBBBBBBBBBBBBB        CCCCCCCCCCCCCCCC
+AAAAAAAAAAAAAAAA        BBBBBBBBBBBBBBBB        CCCCCCCCCCCCCCCC
+A=client B=api C=svc
+
+## Issues
+(none)

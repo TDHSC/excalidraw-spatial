@@ -1,0 +1,55 @@
+# excal inspect tests/fixtures/text_layout.excalidraw
+canvas x0..500 y100..340 | components: 4, containers: 0, connectors: 0 | errors: 0, warnings: 3, info: 2
+
+## Containers
+(none)
+
+## Components
+- n1 "Client" rectangle x0..160 y100..180 c(80,140) parent=- L=- R=n2(60) T=- B=n4(80)
+- n2 "Load Balancer" rectangle x220..380 y105..185 c(300,145) parent=- L=n1(60) R=n3(20) T=- B=-
+- n3 "Notification Service" rectangle x400..500 y100..180 c(450,140) parent=- L=n2(20) R=- T=- B=-
+- n4 "缓存 Cache" rectangle x0..160 y260..340 c(80,300) parent=- L=- R=- T=n1(80) B=-
+
+## Rows
+- top y≈142: n1 --60-- n2 --20-- n3
+
+## Columns
+- top x≈80: n1 --80-- n4
+
+## Connections
+(none)
+
+## Minimap
+AAAAAAAAAAAAAAAAAAAAA       BBBBBBBBBBBBBBBBBBBBB  CCCCCCCCCCCCC
+AAAAAAAAAAAAAAAAAAAAA       BBBBBBBBBBBBBBBBBBBBB  CCCCCCCCCCCCC
+AAAAAAAAAAAAAAAAAAAAA       BBBBBBBBBBBBBBBBBBBBB  CCCCCCCCCCCCC
+AAAAAAAAAAAAAAAAAAAAA       BBBBBBBBBBBBBBBBBBBBB  CCCCCCCCCCCCC
+AAAAAAAAAAAAAAAAAAAAA       BBBBBBBBBBBBBBBBBBBBB  CCCCCCCCCCCCC
+AAAAAAAAAAAAAAAAAAAAA       BBBBBBBBBBBBBBBBBBBBB  CCCCCCCCCCCCC
+
+
+
+
+DDDDDDDDDDDDDDDDDDDDD
+DDDDDDDDDDDDDDDDDDDDD
+DDDDDDDDDDDDDDDDDDDDD
+DDDDDDDDDDDDDDDDDDDDD
+DDDDDDDDDDDDDDDDDDDDD
+DDDDDDDDDDDDDDDDDDDDD
+A=n1 B=n2 C=n3 D=n4
+
+## Issues
+WARN  TEXT_OVERFLOW label of n3 "Notification Service" needs 208x25px but the rectangle is 100x80px
+      fix: grow n3 to fit its label
+      run: excal layout fit-text tests/fixtures/text_layout.excalidraw --id n3
+WARN  NEAR_MISS_ALIGNMENT n1 "Client" and n2 "Load Balancer" are misaligned by 5px (middle)
+      fix: align n2 to n1 (middle)
+      run: excal layout align tests/fixtures/text_layout.excalidraw --ids n1,n2 --axis middle
+WARN  NEAR_MISS_ALIGNMENT n2 "Load Balancer" and n3 "Notification Service" are misaligned by 5px (middle)
+      fix: align n3 to n2 (middle)
+      run: excal layout align tests/fixtures/text_layout.excalidraw --ids n2,n3 --axis middle
+INFO  UNEVEN_SPACING horizontal sequence [n1,n2,n3] has uneven gaps [60, 20]px
+      fix: space them evenly with a 60px gap
+      run: excal layout distribute tests/fixtures/text_layout.excalidraw --ids n1,n2,n3 --direction horizontal --gap 60
+INFO  UNBOUND_TEXT text n4-text "缓存 Cache" sits inside n4 but is not bound to it
+      fix: bind it as the label of n4 (set containerId)

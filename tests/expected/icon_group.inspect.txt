@@ -1,0 +1,41 @@
+# excal inspect tests/fixtures/icon_group.excalidraw
+canvas x0..520 y0..260 | components: 3, containers: 1, connectors: 1 | errors: 0, warnings: 0, info: 0
+
+## Containers
+- Fr8Mw2Nq5Xs1Lp4Kv7RbZ frame "Storage" x0..520 y0..260 parent=- padding T80 R60 B20 L58 children=[group:kq3Xv9TzL2mPw8RbN5cYd, Mx9Cv2Bn5Lk8Jh1Gf4DsA, Ab1Cd2Ef3Gh4Ij5Kl6MnO]
+
+## Components
+- group:kq3Xv9TzL2mPw8RbN5cYd "Postgres" group x58..142 y80..209 c(100,145) parent=Fr8Mw2Nq5Xs1Lp4Kv7RbZ L=- R=Ab1Cd2Ef3Gh4Ij5Kl6MnO(58) T=- B=-
+- Mx9Cv2Bn5Lk8Jh1Gf4DsA "API" rectangle x300..460 y90..170 c(380,130) parent=Fr8Mw2Nq5Xs1Lp4Kv7RbZ L=group:kq3Xv9TzL2mPw8RbN5cYd(158) R=- T=- B=-
+- Ab1Cd2Ef3Gh4Ij5Kl6MnO image x200..240 y200..240 c(220,220) parent=Fr8Mw2Nq5Xs1Lp4Kv7RbZ L=group:kq3Xv9TzL2mPw8RbN5cYd(58) R=- T=- B=-
+
+## Rows
+- Fr8Mw2Nq5Xs1Lp4Kv7RbZ y≈137: group:kq3Xv9TzL2mPw8RbN5cYd --158-- Mx9Cv2Bn5Lk8Jh1Gf4DsA
+
+## Columns
+(none)
+
+## Connections
+- Lg7Hs4Kd1Fp8Wq5Er2TyU Mx9Cv2Bn5Lk8Jh1Gf4DsA -> group:kq3Xv9TzL2mPw8RbN5cYd straight (294,130) -> (146,130)
+
+## Minimap
+................................................................
+.                                                              .
+.                                                              .
+.                                                              .
+.      AAAAAAAAAAA                                             .
+.      AAAAAAAAAAA                  BBBBBBBBBBBBBBBBBBBBB      .
+.      AAAAAAAAAAA                  BBBBBBBBBBBBBBBBBBBBB      .
+.      AAAAAAAAAAA                  BBBBBBBBBBBBBBBBBBBBB      .
+.      AAAAAAAAAAA******************BBBBBBBBBBBBBBBBBBBBB      .
+.      AAAAAAAAAAA                  BBBBBBBBBBBBBBBBBBBBB      .
+.      AAAAAAAAAAA                  BBBBBBBBBBBBBBBBBBBBB      .
+.      AAAAAAAAAAA                                             .
+.      AAAAAAAAAAA      CCCCCC                                 .
+.                       CCCCCC                                 .
+.                       CCCCCC                                 .
+................................................................
+A=group:kq3Xv9TzL2mPw8RbN5cYd B=Mx9Cv2Bn5Lk8Jh1Gf4DsA C=Ab1Cd2Ef3Gh4Ij5Kl6MnO
+
+## Issues
+(none)
