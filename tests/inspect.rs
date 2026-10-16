@@ -256,9 +256,9 @@ fn inspect_json_text_component_neighbors_are_null() {
     );
     assert_eq!(
         note["rect"],
-        serde_json::json!({"x1": 2, "y1": 2, "x2": 12, "y2": 11})
+        serde_json::json!({"x1": 2, "y1": 2, "x2": 26, "y2": 27})
     );
-    assert_eq!(note["center"], serde_json::json!({"x": 7, "y": 7}));
+    assert_eq!(note["center"], serde_json::json!({"x": 14, "y": 15}));
     assert!(note["rect"]["x1"].is_i64());
 }
 

@@ -1,5 +1,8 @@
+use std::fs;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const FIXED_NOW_MS: &str = "1700000000000";
 
@@ -44,6 +47,18 @@ fn num(el: &serde_json::Value, key: &str) -> f64 {
 
 fn approx(a: f64, b: f64) {
     assert!((a - b).abs() < 1e-6, "{a} != {b} (tol 1e-6)");
+}
+
+fn temp_path(tag: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    std::env::temp_dir().join(format!("excal-t20-{}-{}-{tag}", std::process::id(), nanos))
+}
+
+fn cleanup(path: &Path) {
+    let _ = fs::remove_file(path);
 }
 
 fn lint_json(doc_json: &str) -> serde_json::Value {
@@ -393,4 +408,89 @@ fn fit_container_basic_flow_api_is_not_a_container() {
         "api",
     ]);
     assert_eq!(code, 2, "stdout={stdout} stderr={stderr}");
+}
+
+#[test]
+fn fit_text_writes_estimated_bound_label_size() {
+    let path = temp_path("fit-text.excalidraw");
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "box", "x": 100, "y": 100, "width": 120, "height": 80},
+    {
+      "type": "text",
+      "id": "lbl",
+      "x": 140,
+      "y": 127.5,
+      "width": 40,
+      "height": 25,
+      "text": "Order Fulfillment Service",
+      "fontSize": 20,
+      "textAlign": "center",
+      "containerId": "box"
+    }
+  ]
+}"#;
+    fs::write(&path, src).expect("write temp fit-text file");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&["layout", "fit-text", path_str, "--id", "box"]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let out = parse_json(&stdout);
+    let box_el = element(&out, "box");
+    approx(num(box_el, "x"), -14.0);
+    approx(num(box_el, "width"), 348.0);
+    approx(num(box_el, "height"), 80.0);
+    let lbl = element(&out, "lbl");
+    approx(num(lbl, "width"), 300.0);
+    approx(num(lbl, "height"), 25.0);
+    approx(num(lbl, "x"), 10.0);
+    approx(num(lbl, "y"), 127.5);
+}
+
+#[test]
+fn move_arrow_endpoint_writes_estimated_label_size() {
+    let path = temp_path("place-label.excalidraw");
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "a", "x": 0, "y": 100, "width": 140, "height": 80},
+    {"type": "rectangle", "id": "b", "x": 200, "y": 100, "width": 140, "height": 80},
+    {
+      "type": "arrow",
+      "id": "arr",
+      "x": 146,
+      "y": 140,
+      "width": 48,
+      "height": 0,
+      "points": [[0, 0], [48, 0]],
+      "startBinding": {"elementId": "a"},
+      "endBinding": {"elementId": "b"}
+    },
+    {
+      "type": "text",
+      "id": "arr-lbl",
+      "x": 170,
+      "y": 130,
+      "width": 0,
+      "height": 0,
+      "text": "validateToken()",
+      "fontSize": 16,
+      "textAlign": "center",
+      "containerId": "arr"
+    }
+  ]
+}"#;
+    fs::write(&path, src).expect("write temp place-label file");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) =
+        run_layout(&["layout", "move", path_str, "--id", "b", "--dx", "10"]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let out = parse_json(&stdout);
+    let lbl = element(&out, "arr-lbl");
+    approx(num(lbl, "width"), 144.0);
+    approx(num(lbl, "height"), 20.0);
 }

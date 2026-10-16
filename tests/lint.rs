@@ -1,5 +1,7 @@
-use std::fs::File;
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn run(args: &[&str]) -> (i32, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_excal"))
@@ -10,6 +12,18 @@ fn run(args: &[&str]) -> (i32, String, String) {
     let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
     let stderr = String::from_utf8(output.stderr).expect("stderr utf-8");
     (code, stdout, stderr)
+}
+
+fn temp_path(tag: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    std::env::temp_dir().join(format!("excal-t20-{}-{}-{tag}", std::process::id(), nanos))
+}
+
+fn cleanup(path: &Path) {
+    let _ = fs::remove_file(path);
 }
 
 #[test]
@@ -144,5 +158,66 @@ fn lint_stdin_uses_placeholder_file_in_command() {
     assert!(
         stdout.contains("excal layout move <file> --id auth --dx 64"),
         "stdout missing stdin command placeholder:\n{stdout}"
+    );
+}
+
+#[test]
+fn lint_zero_width_arrow_label_reports_estimated_collision() {
+    let path = temp_path("arrow-label.excalidraw");
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "a", "x": 0, "y": 100, "width": 140, "height": 80},
+    {"type": "rectangle", "id": "b", "x": 200, "y": 100, "width": 140, "height": 80},
+    {
+      "type": "arrow",
+      "id": "arr",
+      "x": 146,
+      "y": 140,
+      "width": 48,
+      "height": 0,
+      "points": [[0, 0], [48, 0]],
+      "startBinding": {"elementId": "a"},
+      "endBinding": {"elementId": "b"}
+    },
+    {
+      "type": "text",
+      "id": "arr-lbl",
+      "x": 170,
+      "y": 130,
+      "width": 0,
+      "height": 0,
+      "text": "validateToken()",
+      "fontSize": 16,
+      "textAlign": "center",
+      "containerId": "arr"
+    }
+  ]
+}"#;
+    fs::write(&path, src).expect("write temp lint file");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run(&["lint", path_str]);
+    cleanup(&path);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    let collisions: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.contains("ARROW_LABEL_COLLISION"))
+        .collect();
+    assert_eq!(
+        collisions.len(),
+        2,
+        "expected 2 ARROW_LABEL_COLLISION errors, got {}:\n{stdout}",
+        collisions.len()
+    );
+    for line in &collisions {
+        assert!(
+            line.contains("42x20px"),
+            "collision message missing 42x20px: {line}"
+        );
+    }
+    assert!(
+        stdout.contains(&format!("excal layout move {path_str} --id b --dx 104")),
+        "stdout missing lengthen command:\n{stdout}"
     );
 }

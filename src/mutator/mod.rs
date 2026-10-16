@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use crate::geometry::Rect;
 use crate::scene_graph::{ComponentKind, ContainerKind, Scene};
 use crate::schema::Document;
+use crate::text_metrics::text_size;
 
 use self::sync_bindings::{bound_text_xy, sync_arrows};
 
@@ -86,7 +87,7 @@ pub fn apply(
         )?;
     }
 
-    let connectors = sync_arrows(doc, old_scene, &changed, &elem_changed, &skip_sync);
+    let connectors = sync_arrows(doc, old_scene, &changed, &mut elem_changed, &skip_sync);
     Ok(ApplyReport {
         moved: expanded.len() + connector_moves.len(),
         resized,
@@ -255,18 +256,20 @@ fn reposition_bound_text(
     if el.container_id.as_deref() != Some(primary_id) {
         return;
     }
-    let tw = el.width();
-    let th = el.height();
-    let (x, y) = bound_text_xy(
-        r,
-        tw,
-        th,
-        el.text_align.as_deref(),
-        el.vertical_align.as_deref(),
-    );
+    let ts = text_size(el);
+    let tw = ts.width;
+    let th = ts.height;
+    let estimated = ts.estimated;
+    let text_align = el.text_align.clone();
+    let vertical_align = el.vertical_align.clone();
     let old_rect = el.rect();
+    let (x, y) = bound_text_xy(r, tw, th, text_align.as_deref(), vertical_align.as_deref());
     doc.set_num(label_id, "x", x);
     doc.set_num(label_id, "y", y);
+    if estimated {
+        doc.set_num(label_id, "width", tw);
+        doc.set_num(label_id, "height", th);
+    }
     elem_changed.insert(
         label_id.to_string(),
         (old_rect, Rect::from_xywh(x, y, tw, th)),

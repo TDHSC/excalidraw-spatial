@@ -5,7 +5,7 @@ use crate::linter::{
     label_str, LintIssue, Severity, SHAPE_TYPES, ZONE_CHILD_AREA_RATIO, ZONE_TITLE_BAND,
 };
 use crate::schema::{Document, RawElement};
-use crate::text_metrics::{text_size, TextSize};
+use crate::text_metrics::{text_rect, text_size, TextSize};
 
 const NEAR_DIST: f64 = 12.0;
 
@@ -131,7 +131,7 @@ impl Scene {
                     ArrowLabel {
                         text: el.text.clone().unwrap_or_default(),
                         element_id: el.id.clone(),
-                        rect: el.rect(),
+                        rect: text_rect(el),
                     },
                 );
             } else {
@@ -291,9 +291,9 @@ impl Scene {
             if el.element_type != "text" || claimed.contains(&el.id) {
                 continue;
             }
-            let text_rect = el.rect();
-            let text_area = text_rect.area();
-            let text_center = text_rect.center();
+            let free_rect = text_rect(el);
+            let text_area = free_rect.area();
+            let text_center = free_rect.center();
             // Equal-area hosts: keep the first Shape in current component order
             // (document/z order for shapes created above).
             let mut best: Option<usize> = None;
@@ -349,7 +349,7 @@ impl Scene {
                 id: el.id.clone(),
                 kind: ComponentKind::Text,
                 type_name: "text".to_string(),
-                rect: el.rect(),
+                rect: text_rect(el),
                 label: el.text.clone(),
                 label_element: Some(el.id.clone()),
                 label_size: Some(text_size(el)),
@@ -652,7 +652,7 @@ fn assign_zone_titles(
             if el.element_type != "text" || claimed.contains(&el.id) {
                 continue;
             }
-            let rect = el.rect();
+            let rect = text_rect(el);
             let center = rect.center();
             if !zone.rect.contains_point(center) || center.y > zone.rect.y1 + band {
                 continue;
@@ -661,7 +661,9 @@ fn assign_zone_titles(
                 continue;
             }
             best = Some(match best {
-                Some(current) if (rect.y1, rect.x1) >= (current.rect().y1, current.rect().x1) => {
+                Some(current)
+                    if (rect.y1, rect.x1) >= (text_rect(current).y1, text_rect(current).x1) =>
+                {
                     current
                 }
                 _ => el,

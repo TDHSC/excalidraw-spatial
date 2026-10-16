@@ -4,6 +4,7 @@ use crate::geometry::{clip_segment, polyline_point_at, Point, Rect};
 use crate::linter::{BINDING_GAP_BASE, BOUND_TEXT_PADDING};
 use crate::scene_graph::{Attach, Scene};
 use crate::schema::Document;
+use crate::text_metrics::text_size;
 
 pub(crate) fn bound_text_xy(
     r: &Rect,
@@ -165,14 +166,34 @@ fn write_arrow_points(doc: &mut Document, id: &str, abs: &[Point]) {
     doc.set_num(id, "height", max_y - min_y);
 }
 
-fn place_label(doc: &mut Document, label_id: &str, abs: &[Point], fraction: f64) {
-    let (tw, th) = match doc.element(label_id) {
-        Some(el) => (el.width(), el.height()),
-        None => return,
+fn place_label(
+    doc: &mut Document,
+    label_id: &str,
+    abs: &[Point],
+    fraction: f64,
+    elem_changed: &mut HashMap<String, (Rect, Rect)>,
+) {
+    let Some(el) = doc.element(label_id) else {
+        return;
     };
+    let ts = text_size(el);
+    let tw = ts.width;
+    let th = ts.height;
+    let estimated = ts.estimated;
+    let old_rect = el.rect();
     let c = polyline_point_at(abs, fraction);
-    doc.set_num(label_id, "x", c.x - tw / 2.0);
-    doc.set_num(label_id, "y", c.y - th / 2.0);
+    let new_x = c.x - tw / 2.0;
+    let new_y = c.y - th / 2.0;
+    doc.set_num(label_id, "x", new_x);
+    doc.set_num(label_id, "y", new_y);
+    if estimated {
+        doc.set_num(label_id, "width", tw);
+        doc.set_num(label_id, "height", th);
+    }
+    elem_changed.insert(
+        label_id.to_string(),
+        (old_rect, Rect::from_xywh(new_x, new_y, tw, th)),
+    );
 }
 
 /// Sync connectors whose attached nodes moved or resized. Returns how many
@@ -181,7 +202,7 @@ pub(crate) fn sync_arrows(
     doc: &mut Document,
     old_scene: &Scene,
     changed: &HashMap<String, (Rect, Rect)>,
-    elem_changed: &HashMap<String, (Rect, Rect)>,
+    elem_changed: &mut HashMap<String, (Rect, Rect)>,
     skip: &HashSet<String>,
 ) -> usize {
     let mut updated = 0;
@@ -292,7 +313,7 @@ pub(crate) fn sync_arrows(
 
         write_arrow_points(doc, &conn.id, &abs);
         if let Some(label_id) = &conn.label_element {
-            place_label(doc, label_id, &abs, label_pos);
+            place_label(doc, label_id, &abs, label_pos, elem_changed);
         }
         updated += 1;
     }
