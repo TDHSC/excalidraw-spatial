@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::geometry::{Point, Rect};
 use crate::linter::{
-    label_str, LintIssue, Severity, SHAPE_TYPES, ZONE_CHILD_AREA_RATIO, ZONE_TITLE_BAND,
+    label_str, LintIssue, Severity, SHAPE_TYPES, ZONE_CHILD_AREA_RATIO, ZONE_CONTAINED_AREA_RATIO,
+    ZONE_TITLE_BAND,
 };
 use crate::schema::{Document, RawElement};
 use crate::text_metrics::{text_rect, text_size, TextSize};
@@ -97,6 +98,7 @@ pub struct Scene {
 struct ShapeLabel {
     text: String,
     element_id: String,
+    vertical_align: Option<String>,
 }
 
 struct ArrowLabel {
@@ -140,6 +142,7 @@ impl Scene {
                     ShapeLabel {
                         text: el.text.clone().unwrap_or_default(),
                         element_id: el.id.clone(),
+                        vertical_align: el.vertical_align.clone(),
                     },
                 );
             }
@@ -171,7 +174,13 @@ impl Scene {
         }
 
         let candidates = candidate_nodes(&elements, &atomic_groups, &atomic_member_ids);
-        let zone_ids = zone_rectangle_ids(&candidates);
+        let zone_ids = zone_rectangle_ids(
+            &candidates,
+            &shape_labels,
+            &elements,
+            &claimed,
+            &atomic_member_ids,
+        );
         let mut containers = Vec::new();
         for candidate in &candidates {
             if !zone_ids.contains(candidate.id) {
@@ -598,25 +607,85 @@ fn candidate_nodes<'a>(
     candidates
 }
 
-fn zone_rectangle_ids<'a>(candidates: &[Candidate<'a>]) -> HashSet<&'a str> {
+fn is_zone_child(parent_rect: &Rect, child_rect: &Rect) -> bool {
+    child_rect.area() <= ZONE_CHILD_AREA_RATIO * parent_rect.area()
+        || (parent_rect.contains_rect(child_rect)
+            && child_rect.area() <= ZONE_CONTAINED_AREA_RATIO * parent_rect.area())
+}
+
+fn zone_rectangle_ids<'a>(
+    candidates: &[Candidate<'a>],
+    shape_labels: &HashMap<String, ShapeLabel>,
+    elements: &[&RawElement],
+    claimed: &HashSet<String>,
+    atomic_member_ids: &HashSet<String>,
+) -> HashSet<&'a str> {
     let mut zones = HashSet::new();
     for rectangle in candidates
         .iter()
         .filter(|candidate| candidate.is_ungrouped_rectangle)
     {
-        let child_limit = ZONE_CHILD_AREA_RATIO * rectangle.rect.area();
-        let nested = candidates
+        let children: Vec<&Candidate> = candidates
             .iter()
             .filter(|other| other.id != rectangle.id)
             .filter(|other| other.z > rectangle.z)
             .filter(|other| rectangle.rect.contains_point(other.rect.center()))
-            .filter(|other| other.rect.area() <= child_limit)
-            .count();
-        if nested >= 2 {
+            .filter(|other| is_zone_child(&rectangle.rect, &other.rect))
+            .collect();
+        if children.len() >= 2 {
             zones.insert(rectangle.id);
+        } else if children.len() == 1 {
+            let child = children[0];
+            if rectangle.rect.contains_rect(&child.rect)
+                && has_top_title_evidence(
+                    rectangle,
+                    child,
+                    shape_labels,
+                    elements,
+                    claimed,
+                    atomic_member_ids,
+                )
+            {
+                zones.insert(rectangle.id);
+            }
         }
     }
     zones
+}
+
+fn has_top_title_evidence(
+    rectangle: &Candidate,
+    child: &Candidate,
+    shape_labels: &HashMap<String, ShapeLabel>,
+    elements: &[&RawElement],
+    claimed: &HashSet<String>,
+    atomic_member_ids: &HashSet<String>,
+) -> bool {
+    if shape_labels
+        .get(rectangle.id)
+        .and_then(|label| label.vertical_align.as_deref())
+        == Some("top")
+    {
+        return true;
+    }
+    let band = f64::from(ZONE_TITLE_BAND);
+    for el in elements {
+        if el.element_type != "text" {
+            continue;
+        }
+        if claimed.contains(&el.id) || atomic_member_ids.contains(&el.id) {
+            continue;
+        }
+        let tr = text_rect(el);
+        let tc = tr.center();
+        if rectangle.rect.contains_point(tc)
+            && tc.y <= rectangle.rect.y1 + band
+            && tc.y < child.rect.y1
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn assign_zone_titles(
@@ -781,14 +850,13 @@ fn group_should_dissolve(members: &[&RawElement]) -> bool {
             continue;
         }
         let rect = rectangle.rect();
-        let child_limit = ZONE_CHILD_AREA_RATIO * rect.area();
         let nested = members
             .iter()
             .filter(|member| member.id != rectangle.id)
             .filter(|member| SHAPE_TYPES.contains(&member.element_type.as_str()))
             .filter(|member| member.z > rectangle.z)
             .filter(|member| rect.contains_point(member.rect().center()))
-            .filter(|member| member.rect().area() <= child_limit)
+            .filter(|member| is_zone_child(&rect, &member.rect()))
             .count();
         if nested >= 2 {
             return true;

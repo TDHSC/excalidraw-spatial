@@ -93,6 +93,10 @@ impl Rect {
         p.x >= self.x1 && p.x <= self.x2 && p.y >= self.y1 && p.y <= self.y2
     }
 
+    pub fn contains_rect(&self, o: &Rect) -> bool {
+        self.x1 <= o.x1 && self.y1 <= o.y1 && o.x2 <= self.x2 && o.y2 <= self.y2
+    }
+
     pub fn overlap_depth(&self, o: &Rect) -> (f64, f64) {
         (
             self.x2.min(o.x2) - self.x1.max(o.x1),
@@ -520,6 +524,28 @@ mod tests {
         assert!(r.contains_point(Point { x: 5.0, y: 10.0 }));
         assert!(!r.contains_point(Point { x: -0.1, y: 5.0 }));
         assert!(!r.contains_point(Point { x: 10.1, y: 5.0 }));
+    }
+
+    #[test]
+    fn contains_rect_inclusive_of_boundaries() {
+        let r = Rect {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 100.0,
+            y2: 100.0,
+        };
+        assert!(r.contains_rect(&Rect {
+            x1: 10.0,
+            y1: 10.0,
+            x2: 100.0,
+            y2: 90.0,
+        }));
+        assert!(!r.contains_rect(&Rect {
+            x1: 10.0,
+            y1: 10.0,
+            x2: 100.1,
+            y2: 90.0,
+        }));
     }
 
     #[test]

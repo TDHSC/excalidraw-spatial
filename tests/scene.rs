@@ -1,5 +1,5 @@
 use excalidraw_spatial::geometry::{Point, Rect};
-use excalidraw_spatial::linter::Severity;
+use excalidraw_spatial::linter::{run_lint, Severity};
 use excalidraw_spatial::scene_graph::{Attach, ComponentKind, ContainerKind, Scene};
 use excalidraw_spatial::schema::Document;
 
@@ -730,4 +730,229 @@ fn equal_area_parents_pick_the_lower_z() {
         scene.component("child").unwrap().parent.as_deref(),
         Some("first")
     );
+}
+
+#[test]
+fn tight_two_node_container_stays_a_zone() {
+    // Parent area 140800; each child 36400 = 25.85% > 0.25, both fully contained.
+    let scene = parse_scene(
+        r#"{
+            "elements": [
+                {
+                    "id": "z",
+                    "type": "rectangle",
+                    "x": 0,
+                    "y": 60,
+                    "width": 640,
+                    "height": 220
+                },
+                {
+                    "id": "b1",
+                    "type": "rectangle",
+                    "x": 40,
+                    "y": 100,
+                    "width": 260,
+                    "height": 140
+                },
+                {
+                    "id": "b2",
+                    "type": "rectangle",
+                    "x": 340,
+                    "y": 100,
+                    "width": 260,
+                    "height": 140
+                }
+            ]
+        }"#,
+    );
+
+    let zone = scene.container("z").expect("z is a zone");
+    assert_eq!(zone.kind, ContainerKind::Zone);
+    assert!(scene.container("b1").is_none());
+    assert!(scene.container("b2").is_none());
+    assert_eq!(scene.component("b1").unwrap().parent.as_deref(), Some("z"));
+    assert_eq!(scene.component("b2").unwrap().parent.as_deref(), Some("z"));
+    assert_eq!(run_lint(&scene, "t21.excalidraw").len(), 0);
+}
+
+#[test]
+fn enlarged_diamond_child_does_not_demote_parent_zone() {
+    // Sub-zone area 120000; diamond 44352 = 36.96% <= 0.65 and fully contained.
+    let scene = parse_scene(
+        r#"{
+            "elements": [
+                {
+                    "id": "z_ingress",
+                    "type": "rectangle",
+                    "x": 30,
+                    "y": 55,
+                    "width": 480,
+                    "height": 250
+                },
+                {
+                    "id": "pay_gw",
+                    "type": "rectangle",
+                    "x": 43,
+                    "y": 119,
+                    "width": 210,
+                    "height": 77
+                },
+                {
+                    "id": "risk_decision",
+                    "type": "diamond",
+                    "x": 200,
+                    "y": 86,
+                    "width": 308,
+                    "height": 144
+                }
+            ]
+        }"#,
+    );
+
+    let zone = scene.container("z_ingress").expect("z_ingress is a zone");
+    assert_eq!(zone.kind, ContainerKind::Zone);
+    assert_eq!(
+        scene.component("pay_gw").unwrap().parent.as_deref(),
+        Some("z_ingress")
+    );
+    assert_eq!(
+        scene.component("risk_decision").unwrap().parent.as_deref(),
+        Some("z_ingress")
+    );
+}
+
+#[test]
+fn single_child_swimlane_with_top_title_is_a_zone() {
+    let scene = parse_scene(
+        r#"{
+            "elements": [
+                {
+                    "id": "lane_db",
+                    "type": "rectangle",
+                    "x": 440,
+                    "y": 0,
+                    "width": 400,
+                    "height": 300
+                },
+                {
+                    "id": "lane_db_title",
+                    "type": "text",
+                    "x": 456,
+                    "y": 12,
+                    "width": 90,
+                    "height": 25,
+                    "text": "Data Layer"
+                },
+                {
+                    "id": "pg",
+                    "type": "rectangle",
+                    "x": 570,
+                    "y": 110,
+                    "width": 140,
+                    "height": 80
+                }
+            ]
+        }"#,
+    );
+
+    let zone = scene.container("lane_db").expect("lane_db is a zone");
+    assert_eq!(zone.kind, ContainerKind::Zone);
+    assert_eq!(zone.name.as_deref(), Some("Data Layer"));
+    assert_eq!(
+        scene.component("pg").unwrap().parent.as_deref(),
+        Some("lane_db")
+    );
+}
+
+#[test]
+fn single_icon_and_centered_label_do_not_make_a_zone() {
+    // Title-band evidence fails: lbl center y 40.5 is not above icon.y1 20.
+    let scene = parse_scene(
+        r#"{
+            "elements": [
+                {
+                    "id": "box",
+                    "type": "rectangle",
+                    "x": 0,
+                    "y": 0,
+                    "width": 160,
+                    "height": 80
+                },
+                {
+                    "id": "icon",
+                    "type": "rectangle",
+                    "x": 12,
+                    "y": 20,
+                    "width": 24,
+                    "height": 24
+                },
+                {
+                    "id": "lbl",
+                    "type": "text",
+                    "x": 50,
+                    "y": 28,
+                    "width": 80,
+                    "height": 25,
+                    "text": "Service"
+                }
+            ]
+        }"#,
+    );
+
+    assert!(scene
+        .containers
+        .iter()
+        .all(|c| c.kind != ContainerKind::Zone));
+    assert!(scene.container("box").is_none());
+    let box_shape = scene.component("box").expect("box stays a shape");
+    assert_eq!(box_shape.kind, ComponentKind::Shape);
+    assert!(scene.component("lbl").is_some() || box_shape.elements.iter().any(|id| id == "lbl"));
+}
+
+#[test]
+fn grouped_contained_children_between_ratios_still_dissolve() {
+    // Each child is 30% of the parent and fully contained, so only the
+    // contained-area rule (0.65) qualifies them. Dissolve must use that rule.
+    let scene = parse_scene(
+        r#"{
+            "elements": [
+                {
+                    "id": "bg",
+                    "type": "rectangle",
+                    "x": 0,
+                    "y": 0,
+                    "width": 400,
+                    "height": 300,
+                    "groupIds": ["g1"]
+                },
+                {
+                    "id": "a",
+                    "type": "rectangle",
+                    "x": 10,
+                    "y": 10,
+                    "width": 180,
+                    "height": 200,
+                    "groupIds": ["g1"]
+                },
+                {
+                    "id": "b",
+                    "type": "rectangle",
+                    "x": 210,
+                    "y": 10,
+                    "width": 180,
+                    "height": 200,
+                    "groupIds": ["g1"]
+                }
+            ]
+        }"#,
+    );
+
+    assert!(scene
+        .components
+        .iter()
+        .all(|component| component.kind != ComponentKind::Group));
+    let zone = scene.container("bg").expect("dissolved rectangle zone");
+    assert_eq!(zone.kind, ContainerKind::Zone);
+    assert_eq!(scene.component("a").unwrap().parent.as_deref(), Some("bg"));
+    assert_eq!(scene.component("b").unwrap().parent.as_deref(), Some("bg"));
 }

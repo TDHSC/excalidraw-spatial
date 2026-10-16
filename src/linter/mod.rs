@@ -7,6 +7,7 @@ use crate::scene_graph::Scene;
 pub const MIN_GAP: i32 = 40;
 pub const NEAR_DIST: i32 = 12;
 pub const ZONE_CHILD_AREA_RATIO: f64 = 0.25;
+pub const ZONE_CONTAINED_AREA_RATIO: f64 = 0.65;
 pub const ZONE_TITLE_BAND: i32 = 40;
 pub const CONTAINER_WARN_PADDING: i32 = 10;
 pub const TEXT_PAD_X: i32 = 20;
