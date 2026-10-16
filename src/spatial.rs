@@ -289,6 +289,7 @@ mod tests {
             },
             label: None,
             label_element: None,
+            label_size: None,
             elements: vec![id.to_string()],
             parent: None,
             frame_id: None,

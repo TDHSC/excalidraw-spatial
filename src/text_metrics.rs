@@ -2,7 +2,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::schema::RawElement;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextSize {
     pub width: f64,
     pub height: f64,

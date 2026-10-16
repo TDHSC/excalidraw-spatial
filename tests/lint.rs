@@ -34,6 +34,35 @@ fn lint_basic_flow_matches_golden_and_exits_0() {
 }
 
 #[test]
+fn lint_text_layout_matches_golden_and_exits_0() {
+    let (code, stdout, _stderr) = run(&["lint", "tests/fixtures/text_layout.excalidraw"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, include_str!("expected/text_layout.lint.txt"));
+}
+
+#[test]
+fn lint_text_layout_strict_exits_1_with_same_stdout() {
+    let (code, stdout, _stderr) =
+        run(&["lint", "tests/fixtures/text_layout.excalidraw", "--strict"]);
+    assert_eq!(code, 1);
+    assert_eq!(stdout, include_str!("expected/text_layout.lint.txt"));
+}
+
+#[test]
+fn lint_stdin_still_reports_text_overflow() {
+    let fixture = File::open("tests/fixtures/text_layout.excalidraw").expect("open fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_excal"))
+        .args(["lint", "-"])
+        .stdin(Stdio::from(fixture))
+        .output()
+        .expect("failed to execute excal");
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    let expected = include_str!("expected/text_layout.lint.txt")
+        .replace("tests/fixtures/text_layout.excalidraw", "<file>");
+    assert_eq!(stdout, expected);
+}
+
+#[test]
 fn lint_overlap_json_matches_spec_sample() {
     let (code, stdout, _stderr) = run(&[
         "lint",

@@ -5,6 +5,7 @@ use crate::linter::{
     label_str, LintIssue, Severity, SHAPE_TYPES, ZONE_CHILD_AREA_RATIO, ZONE_TITLE_BAND,
 };
 use crate::schema::{Document, RawElement};
+use crate::text_metrics::{text_size, TextSize};
 
 const NEAR_DIST: f64 = 12.0;
 
@@ -24,6 +25,9 @@ pub struct Component {
     pub rect: Rect,
     pub label: Option<String>,
     pub label_element: Option<String>,
+    /// `text_size` of `label_element`, captured at build so lint can run without the document.
+    #[serde(skip)]
+    pub label_size: Option<TextSize>,
     pub elements: Vec<String>,
     pub parent: Option<String>,
     pub frame_id: Option<String>,
@@ -228,6 +232,7 @@ impl Scene {
                     Some(texts.join(" "))
                 },
                 label_element: None,
+                label_size: None,
                 elements: member_ids,
                 parent: None,
                 frame_id,
@@ -247,6 +252,12 @@ impl Scene {
             if let Some(label) = &label {
                 member_ids.push(label.element_id.clone());
             }
+            let label_size = label.as_ref().and_then(|label| {
+                elements
+                    .iter()
+                    .find(|candidate| candidate.id == label.element_id)
+                    .map(|candidate| text_size(candidate))
+            });
             components.push(Component {
                 id: el.id.clone(),
                 kind: ComponentKind::Shape,
@@ -254,6 +265,7 @@ impl Scene {
                 rect: el.rect(),
                 label: label.as_ref().map(|label| label.text.clone()),
                 label_element: label.map(|label| label.element_id),
+                label_size,
                 elements: member_ids,
                 parent: None,
                 frame_id: non_empty(el.frame_id.as_deref()),
@@ -313,6 +325,7 @@ impl Scene {
                 });
                 host.label = Some(text);
                 host.label_element = Some(el.id.clone());
+                host.label_size = Some(text_size(el));
             }
             claimed.insert(el.id.clone());
         }
@@ -328,6 +341,7 @@ impl Scene {
                 rect: el.rect(),
                 label: el.text.clone(),
                 label_element: Some(el.id.clone()),
+                label_size: Some(text_size(el)),
                 elements: vec![el.id.clone()],
                 parent: None,
                 frame_id: non_empty(el.frame_id.as_deref()),
