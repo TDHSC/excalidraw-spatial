@@ -591,6 +591,70 @@ fn fit_text_all_reclips_orbit_arrow_after_resize() {
 }
 
 #[test]
+fn place_b_below_a_routes_elbow_vertically_to_avoid_self_crossing() {
+    let path = temp_path("b09a-place.excalidraw");
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {
+      "type": "rectangle",
+      "id": "A",
+      "x": 100,
+      "y": 100,
+      "width": 140,
+      "height": 80,
+      "boundElements": [{"type": "arrow", "id": "arr"}]
+    },
+    {
+      "type": "rectangle",
+      "id": "B",
+      "x": 340,
+      "y": 100,
+      "width": 140,
+      "height": 80,
+      "boundElements": [{"type": "arrow", "id": "arr"}]
+    },
+    {
+      "type": "arrow",
+      "id": "arr",
+      "x": 246,
+      "y": 140,
+      "width": 88,
+      "height": 0,
+      "points": [[0, 0], [88, 0]],
+      "elbowed": true,
+      "startBinding": {"elementId": "A", "fixedPoint": [1, 0.5]},
+      "endBinding": {"elementId": "B", "fixedPoint": [0, 0.5]}
+    }
+  ]
+}"#;
+    fs::write(&path, src).expect("write temp b09a file");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) =
+        run_layout(&["layout", "place", path_str, "--id", "B", "--below", "A"]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let out = parse_json(&stdout);
+
+    let arr = element(&out, "arr");
+    approx(num(arr, "x"), 246.0);
+    approx(num(arr, "y"), 140.0);
+    assert_eq!(
+        arr["points"],
+        serde_json::json!([[0, 0], [0, 60], [-152, 60], [-152, 120]])
+    );
+
+    let issues = lint_issues(&stdout);
+    assert!(
+        issues
+            .iter()
+            .all(|issue| issue["rule"] != "ARROW_CROSSING_NODE"),
+        "ARROW_CROSSING_NODE: {issues:?}"
+    );
+}
+
+#[test]
 fn move_fetcher_toward_parser_clips_forward_at_4px_gap() {
     let path = temp_path("b12a-move.excalidraw");
     let src = r#"{

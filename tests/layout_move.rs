@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -384,6 +385,139 @@ fn move_auth_stderr_is_exactly_two_summary_lines() {
         "excal: moved 1 item(s), resized 0 item(s), updated 0 connector(s)\n\
          excal: lint after change: errors: 0, warnings: 0, info: 0\n"
     );
+}
+
+#[test]
+fn move_card_net_keeps_parallel_orbit_arrows_separated() {
+    let path = temp_path("b13-parallel.excalidraw");
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {
+      "type": "rectangle",
+      "id": "psp_router",
+      "x": 60,
+      "y": 420,
+      "width": 175,
+      "height": 75,
+      "boundElements": [
+        {"type": "arrow", "id": "a_req"},
+        {"type": "arrow", "id": "a_resp"}
+      ]
+    },
+    {
+      "type": "rectangle",
+      "id": "card_net",
+      "x": 335,
+      "y": 420,
+      "width": 175,
+      "height": 75,
+      "boundElements": [
+        {"type": "arrow", "id": "a_req"},
+        {"type": "arrow", "id": "a_resp"}
+      ]
+    },
+    {
+      "type": "arrow",
+      "id": "a_req",
+      "x": 241,
+      "y": 440,
+      "width": 88,
+      "height": 0,
+      "points": [[0, 0], [88, 0]],
+      "startBinding": {"elementId": "psp_router", "mode": "orbit"},
+      "endBinding": {"elementId": "card_net", "mode": "orbit"}
+    },
+    {
+      "type": "text",
+      "id": "a_req-label",
+      "x": 241,
+      "y": 430,
+      "width": 88,
+      "height": 20,
+      "text": "AUTH req",
+      "fontSize": 16,
+      "textAlign": "center",
+      "containerId": "a_req"
+    },
+    {
+      "type": "arrow",
+      "id": "a_resp",
+      "x": 329,
+      "y": 475,
+      "width": 88,
+      "height": 0,
+      "points": [[0, 0], [-88, 0]],
+      "startBinding": {"elementId": "card_net", "mode": "orbit"},
+      "endBinding": {"elementId": "psp_router", "mode": "orbit"}
+    },
+    {
+      "type": "text",
+      "id": "a_resp-label",
+      "x": 241,
+      "y": 465,
+      "width": 88,
+      "height": 20,
+      "text": "200 OK",
+      "fontSize": 16,
+      "textAlign": "center",
+      "containerId": "a_resp"
+    }
+  ]
+}"#;
+    fs::write(&path, src).expect("write temp b13 file");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) =
+        run_layout(&["layout", "move", path_str, "--id", "card_net", "--dx", "50"]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let out = parse_json(&stdout);
+
+    let a_req = element(&out, "a_req");
+    approx(num(a_req, "x"), 241.0);
+    approx(num(a_req, "y"), 440.0);
+    assert_eq!(a_req["points"], serde_json::json!([[0, 0], [138, 0]]));
+
+    let a_resp = element(&out, "a_resp");
+    approx(num(a_resp, "x"), 379.0);
+    approx(num(a_resp, "y"), 475.0);
+    assert_eq!(a_resp["points"], serde_json::json!([[0, 0], [-138, 0]]));
+
+    let issues = lint_issues(&stdout);
+    assert!(
+        issues
+            .iter()
+            .all(|issue| issue["rule"] != "ARROW_LABEL_COLLISION"),
+        "ARROW_LABEL_COLLISION: {issues:?}"
+    );
+}
+
+fn lint_issues(doc_json: &str) -> Vec<serde_json::Value> {
+    let mut child = Command::new(bin())
+        .args(["lint", "-", "--format", "json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn lint");
+    child
+        .stdin
+        .take()
+        .expect("lint stdin")
+        .write_all(doc_json.as_bytes())
+        .expect("write lint stdin");
+    let output = child.wait_with_output().expect("lint");
+    assert_eq!(
+        output.status.code().expect("lint code"),
+        0,
+        "lint stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_json(&String::from_utf8(output.stdout).expect("lint stdout utf-8"))["issues"]
+        .as_array()
+        .expect("issues")
+        .clone()
 }
 
 #[test]

@@ -46,6 +46,26 @@ pub(crate) fn normalized_anchor(rect: &Rect, p: Point) -> (f64, f64) {
     (u, v)
 }
 
+fn clamped_anchor(rect: &Rect, p: Point) -> [f64; 2] {
+    let (u, v) = normalized_anchor(rect, p);
+    [u.clamp(0.1, 0.9), v.clamp(0.1, 0.9)]
+}
+
+fn attach_target(attach: &Attach) -> Option<&str> {
+    match attach {
+        Attach::Bound { target, .. } | Attach::Near { target, .. } => Some(target.as_str()),
+        Attach::Free => None,
+    }
+}
+
+fn unordered_pair(start: &str, end: &str) -> (String, String) {
+    if start <= end {
+        (start.to_string(), end.to_string())
+    } else {
+        (end.to_string(), start.to_string())
+    }
+}
+
 fn focus_point(rect: &Rect, fixed: Option<[f64; 2]>) -> Point {
     match fixed {
         Some([fx, fy]) => Point {
@@ -150,41 +170,89 @@ struct EndGeom {
     gap: f64,
 }
 
+struct EndGeomInput<'a> {
+    fixed_point: Option<[f64; 2]>,
+    original_end: Point,
+    preserve_offset: bool,
+    old_scene: &'a Scene,
+    doc: &'a Document,
+}
+
 fn end_geom(
     attach: &Attach,
     changed: &HashMap<String, (Rect, Rect)>,
     elem_changed: &HashMap<String, (Rect, Rect)>,
-    fixed_point: Option<[f64; 2]>,
-    old_scene: &Scene,
-    doc: &Document,
+    input: EndGeomInput<'_>,
 ) -> Option<EndGeom> {
     match attach {
         Attach::Free => None,
         Attach::Bound { element, .. } => {
-            let rect = current_elem_rect(element, elem_changed, doc)?;
+            let rect = current_elem_rect(element, elem_changed, input.doc)?;
             let gap = BINDING_GAP_BASE as f64
-                + doc
+                + input
+                    .doc
                     .element(element)
                     .map(|el| el.stroke_width())
                     .unwrap_or(2.0)
                     / 2.0;
-            Some(EndGeom {
-                focus: focus_point(&rect, fixed_point),
-                rect,
-                gap,
-            })
+            let focus = if input.fixed_point.is_none() && input.preserve_offset {
+                let old_rect = elem_changed
+                    .get(element)
+                    .map(|(old, _)| *old)
+                    .unwrap_or(rect);
+                focus_point(&rect, Some(clamped_anchor(&old_rect, input.original_end)))
+            } else {
+                focus_point(&rect, input.fixed_point)
+            };
+            Some(EndGeom { focus, rect, gap })
         }
         Attach::Near { target, .. } => {
             let rect = changed
                 .get(target)
                 .map(|(_, new_rect)| *new_rect)
-                .or_else(|| old_scene.rect_of(target))?;
+                .or_else(|| input.old_scene.rect_of(target))?;
             Some(EndGeom {
                 focus: rect.center(),
                 rect,
                 gap: 6.0,
             })
         }
+    }
+}
+
+fn route_hits_inset(route: &[Point], s_rect: &Rect, e_rect: &Rect) -> bool {
+    let s_inset = s_rect.inflate(-2.0);
+    let e_inset = e_rect.inflate(-2.0);
+    route.windows(2).any(|seg| {
+        clip_segment(seg[0], seg[1], &s_inset).is_some()
+            || clip_segment(seg[0], seg[1], &e_inset).is_some()
+    })
+}
+
+fn elbow_two_point_route(
+    s: Point,
+    e: Point,
+    horizontal: bool,
+    s_rect: &Rect,
+    e_rect: &Rect,
+) -> Vec<Point> {
+    let route_h = {
+        let m = (s.x + e.x) / 2.0;
+        vec![s, Point { x: m, y: s.y }, Point { x: m, y: e.y }, e]
+    };
+    let route_v = {
+        let m = (s.y + e.y) / 2.0;
+        vec![s, Point { x: s.x, y: m }, Point { x: e.x, y: m }, e]
+    };
+    let (primary, alt) = if horizontal {
+        (route_h, route_v)
+    } else {
+        (route_v, route_h)
+    };
+    if route_hits_inset(&primary, s_rect, e_rect) && !route_hits_inset(&alt, s_rect, e_rect) {
+        alt
+    } else {
+        primary
     }
 }
 
@@ -255,6 +323,12 @@ pub(crate) fn sync_arrows(
 ) -> usize {
     let mut updated = 0;
     let connectors = old_scene.connectors.clone();
+    let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
+    for conn in &connectors {
+        if let (Some(start), Some(end)) = (attach_target(&conn.start), attach_target(&conn.end)) {
+            *pair_counts.entry(unordered_pair(start, end)).or_insert(0) += 1;
+        }
+    }
     for conn in connectors {
         if skip.contains(&conn.id) {
             continue;
@@ -300,6 +374,11 @@ pub(crate) fn sync_arrows(
         let mut abs = original.clone();
         let mut used = false;
 
+        let bundle_count = attach_target(&conn.start)
+            .zip(attach_target(&conn.end))
+            .and_then(|(start, end)| pair_counts.get(&unordered_pair(start, end)).copied())
+            .unwrap_or(1);
+        let preserve_offset = bundle_count >= 2;
         let case_a = !conn.elbowed
             && original.len() == 2
             && !matches!(conn.start, Attach::Free)
@@ -307,8 +386,30 @@ pub(crate) fn sync_arrows(
             && !same;
         if case_a {
             if let (Some(gs), Some(ge)) = (
-                end_geom(&conn.start, changed, elem_changed, start_fp, old_scene, doc),
-                end_geom(&conn.end, changed, elem_changed, end_fp, old_scene, doc),
+                end_geom(
+                    &conn.start,
+                    changed,
+                    elem_changed,
+                    EndGeomInput {
+                        fixed_point: start_fp,
+                        original_end: start_p,
+                        preserve_offset,
+                        old_scene,
+                        doc,
+                    },
+                ),
+                end_geom(
+                    &conn.end,
+                    changed,
+                    elem_changed,
+                    EndGeomInput {
+                        fixed_point: end_fp,
+                        original_end: end_p,
+                        preserve_offset,
+                        old_scene,
+                        doc,
+                    },
+                ),
             ) {
                 let cs = clip_segment(gs.focus, ge.focus, &gs.rect.inflate(gs.gap));
                 let ce = clip_segment(gs.focus, ge.focus, &ge.rect.inflate(ge.gap));
@@ -365,7 +466,40 @@ pub(crate) fn sync_arrows(
                     let s = abs[0];
                     let e = abs[1];
                     if (e.x - s.x).abs() > 0.5 && (e.y - s.y).abs() > 0.5 {
-                        if is_horizontal(original[0], original[1]) {
+                        if let (Some(gs), Some(ge)) = (
+                            end_geom(
+                                &conn.start,
+                                changed,
+                                elem_changed,
+                                EndGeomInput {
+                                    fixed_point: start_fp,
+                                    original_end: start_p,
+                                    preserve_offset: false,
+                                    old_scene,
+                                    doc,
+                                },
+                            ),
+                            end_geom(
+                                &conn.end,
+                                changed,
+                                elem_changed,
+                                EndGeomInput {
+                                    fixed_point: end_fp,
+                                    original_end: end_p,
+                                    preserve_offset: false,
+                                    old_scene,
+                                    doc,
+                                },
+                            ),
+                        ) {
+                            abs = elbow_two_point_route(
+                                s,
+                                e,
+                                is_horizontal(original[0], original[1]),
+                                &gs.rect,
+                                &ge.rect,
+                            );
+                        } else if is_horizontal(original[0], original[1]) {
                             let m = (s.x + e.x) / 2.0;
                             abs = vec![s, Point { x: m, y: s.y }, Point { x: m, y: e.y }, e];
                         } else {
