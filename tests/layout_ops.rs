@@ -1210,3 +1210,68 @@ fn adjacent_sibling_zone_does_not_steal_retained_child() {
         "remaining overlaps: {after}"
     );
 }
+
+fn nested_pci_ingress() -> String {
+    // Same nesting as the scene attribution case, with z_ingress already
+    // inset so fit-container must grow it without entering the parent title band.
+    r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "z_pci", "x": 0, "y": 0, "width": 1080, "height": 620},
+    {"type": "text", "id": "z_pci_title", "x": 16, "y": 12, "width": 324, "height": 25, "text": "Global PCI-DSS Payment Mesh", "fontSize": 20, "lineHeight": 1.25},
+    {"type": "rectangle", "id": "z_ingress", "x": 30, "y": 55, "width": 480, "height": 250},
+    {"type": "text", "id": "z_ingress_title", "x": 46, "y": 67, "width": 228, "height": 25, "text": "1. Edge & Risk Gate", "fontSize": 20, "lineHeight": 1.25},
+    {"type": "rectangle", "id": "pay_gw", "x": 60, "y": 120, "width": 175, "height": 75},
+    {"type": "diamond", "id": "risk_decision", "x": 300, "y": 86, "width": 180, "height": 144}
+  ]
+}"#
+    .to_string()
+}
+
+#[test]
+fn fit_container_nested_zone_stops_at_parent_title_band() {
+    let path = temp_path("b18-fit-ingress.excalidraw");
+    fs::write(&path, nested_pci_ingress()).expect("write nested zones");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "fit-container",
+        path_str,
+        "--id",
+        "z_ingress",
+        "--padding",
+        "40",
+        "--expand-only",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: lint after change: errors: 0, warnings: 0, info: 0"),
+        "stderr={stderr}"
+    );
+
+    let out = parse_json(&stdout);
+    let ingress = element(&out, "z_ingress");
+    approx(num(ingress, "x"), 20.0);
+    approx(num(ingress, "y"), 52.5);
+    approx(num(ingress, "width"), 500.0);
+    approx(num(ingress, "height"), 252.5);
+    let title = element(&out, "z_ingress_title");
+    approx(num(title, "x"), 36.0);
+    approx(num(title, "y"), 55.0);
+
+    let scene = scene_of(&stdout);
+    assert_eq!(
+        scene.container("z_pci").unwrap().title_element.as_deref(),
+        Some("z_pci_title")
+    );
+    assert_eq!(
+        scene
+            .container("z_ingress")
+            .unwrap()
+            .title_element
+            .as_deref(),
+        Some("z_ingress_title")
+    );
+}

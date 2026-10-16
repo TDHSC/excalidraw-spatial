@@ -1,8 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::geometry::{ceil_px, Rect};
-use crate::linter::{text_factor, MIN_GAP, NEAR_MISS_MAX, TEXT_PAD_X, TEXT_PAD_Y, TEXT_SHAPES};
-use crate::scene_graph::{zone_admits, Component, ComponentKind, ContainerKind, Scene, Target};
+use crate::linter::{
+    text_factor, MIN_GAP, NEAR_MISS_MAX, TEXT_PAD_X, TEXT_PAD_Y, TEXT_SHAPES, ZONE_TITLE_BAND,
+};
+use crate::scene_graph::{
+    zone_admits, Component, ComponentKind, Container, ContainerKind, Scene, Target,
+};
 use crate::spatial::{self, Track};
 use crate::{Axis, Direction, PlaceAlign};
 
@@ -592,10 +596,30 @@ pub fn fit_container(
     if expand_only {
         new_rect = container.rect.union(&new_rect);
     }
+    if let Some(floor) = parent_title_floor(scene, container) {
+        new_rect.y1 = new_rect.y1.max(floor.min(container.rect.y1).min(union.y1));
+    }
     Ok(Change {
         moves: vec![],
         resizes: vec![(container_id, new_rect)],
     })
+}
+
+pub(crate) fn title_band_floor(zone: &Container, rect: &Rect) -> Option<f64> {
+    if zone.kind == ContainerKind::Zone && zone.title_element.is_some() {
+        Some(rect.y1 + f64::from(ZONE_TITLE_BAND) + zone.title_height.unwrap_or(0.0) / 2.0)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn parent_title_floor(scene: &Scene, c: &Container) -> Option<f64> {
+    if c.kind != ContainerKind::Zone {
+        return None;
+    }
+    let parent_id = c.parent.as_deref()?;
+    let parent = scene.container(parent_id)?;
+    title_band_floor(parent, &parent.rect)
 }
 
 pub fn fit_text(

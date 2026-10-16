@@ -770,7 +770,12 @@ fn assign_zone_titles(
 
     let band = f64::from(ZONE_TITLE_BAND);
     for index in order {
-        let zone = &containers[index];
+        // Copy zone fields so the reservation scan can iterate `containers`
+        // without holding `&containers[index]` across that loop.
+        let (zone_id, zone_rect, zone_z) = {
+            let zone = &containers[index];
+            (zone.id.clone(), zone.rect, zone.z)
+        };
         let mut best: Option<&RawElement> = None;
         for el in elements {
             if el.element_type != "text" || claimed.contains(&el.id) {
@@ -778,10 +783,23 @@ fn assign_zone_titles(
             }
             let rect = text_rect(el);
             let center = rect.center();
-            if !zone.rect.contains_point(center) || center.y > zone.rect.y1 + band {
+            if !zone_rect.contains_point(center) || center.y > zone_rect.y1 + band {
                 continue;
             }
             if nodes.iter().any(|node| node.rect.contains_point(center)) {
+                continue;
+            }
+            if el.z < zone_z
+                && containers.iter().any(|other| {
+                    other.kind == ContainerKind::Zone
+                        && other.name.is_none()
+                        && other.id != zone_id
+                        && other.z < el.z
+                        && zone_admits(&other.rect, other.z, &zone_rect, zone_z, true)
+                        && other.rect.contains_point(center)
+                        && center.y <= other.rect.y1 + band
+                })
+            {
                 continue;
             }
             best = Some(match best {

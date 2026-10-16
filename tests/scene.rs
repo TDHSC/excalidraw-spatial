@@ -1027,3 +1027,208 @@ fn overlapping_sibling_zone_is_not_swallowed_as_child() {
     assert_eq!(scene.component("d").unwrap().parent.as_deref(), Some("z2"));
     assert_eq!(scene.component("e").unwrap().parent.as_deref(), Some("z2"));
 }
+
+#[test]
+fn nested_zone_keeps_enclosing_title_and_its_own() {
+    // z_pci_title is drawn after z_pci and before z_ingress, so the inner zone
+    // must not claim it even though the text center sits in the inner band.
+    let scene = parse_scene(
+        r#"{
+            "elements": [
+                {
+                    "id": "z_pci",
+                    "type": "rectangle",
+                    "x": 0,
+                    "y": 0,
+                    "width": 1080,
+                    "height": 620
+                },
+                {
+                    "id": "z_pci_title",
+                    "type": "text",
+                    "x": 16,
+                    "y": 12,
+                    "width": 324,
+                    "height": 25,
+                    "text": "Global PCI-DSS Payment Mesh",
+                    "fontSize": 20,
+                    "lineHeight": 1.25
+                },
+                {
+                    "id": "z_ingress",
+                    "type": "rectangle",
+                    "x": 20,
+                    "y": 11,
+                    "width": 500,
+                    "height": 294
+                },
+                {
+                    "id": "z_ingress_title",
+                    "type": "text",
+                    "x": 36,
+                    "y": 23,
+                    "width": 228,
+                    "height": 25,
+                    "text": "1. Edge & Risk Gate",
+                    "fontSize": 20,
+                    "lineHeight": 1.25
+                },
+                {
+                    "id": "pay_gw",
+                    "type": "rectangle",
+                    "x": 60,
+                    "y": 120,
+                    "width": 175,
+                    "height": 75
+                },
+                {
+                    "id": "risk_decision",
+                    "type": "diamond",
+                    "x": 300,
+                    "y": 86,
+                    "width": 180,
+                    "height": 144
+                }
+            ]
+        }"#,
+    );
+
+    let ingress = scene.container("z_ingress").expect("inner zone");
+    let pci = scene.container("z_pci").expect("outer zone");
+    assert_eq!(ingress.title_element.as_deref(), Some("z_ingress_title"));
+    assert_eq!(pci.title_element.as_deref(), Some("z_pci_title"));
+    assert_eq!(ingress.parent.as_deref(), Some("z_pci"));
+}
+
+#[test]
+fn title_drawn_before_single_zone_still_names_it() {
+    let scene = parse_scene(
+        r#"{
+            "elements": [
+                {
+                    "id": "lane_title",
+                    "type": "text",
+                    "x": 16,
+                    "y": 12,
+                    "width": 90,
+                    "height": 25,
+                    "text": "Data Layer",
+                    "fontSize": 20
+                },
+                {
+                    "id": "lane",
+                    "type": "rectangle",
+                    "x": 0,
+                    "y": 0,
+                    "width": 400,
+                    "height": 300
+                },
+                {
+                    "id": "a",
+                    "type": "rectangle",
+                    "x": 40,
+                    "y": 110,
+                    "width": 140,
+                    "height": 80
+                },
+                {
+                    "id": "b",
+                    "type": "rectangle",
+                    "x": 220,
+                    "y": 110,
+                    "width": 140,
+                    "height": 80
+                }
+            ]
+        }"#,
+    );
+
+    let lane = scene.container("lane").expect("lane is a zone");
+    assert_eq!(lane.name.as_deref(), Some("Data Layer"));
+}
+
+#[test]
+fn overlapping_sibling_does_not_reserve_the_other_zones_title() {
+    // z2 overlaps z but is not enclosed by it, so each zone keeps the title
+    // drawn in its own band.
+    let scene = parse_scene(
+        r#"{
+            "elements": [
+                {
+                    "id": "z",
+                    "type": "rectangle",
+                    "x": 0,
+                    "y": 0,
+                    "width": 760,
+                    "height": 300
+                },
+                {
+                    "id": "t",
+                    "type": "text",
+                    "x": 16,
+                    "y": 12,
+                    "width": 80,
+                    "height": 25,
+                    "text": "Lane",
+                    "fontSize": 20
+                },
+                {
+                    "id": "t2",
+                    "type": "text",
+                    "x": 656,
+                    "y": 12,
+                    "width": 80,
+                    "height": 25,
+                    "text": "Lane 2",
+                    "fontSize": 20
+                },
+                {
+                    "id": "z2",
+                    "type": "rectangle",
+                    "x": 640,
+                    "y": 0,
+                    "width": 400,
+                    "height": 300
+                },
+                {
+                    "id": "a",
+                    "type": "rectangle",
+                    "x": 40,
+                    "y": 110,
+                    "width": 140,
+                    "height": 80
+                },
+                {
+                    "id": "b",
+                    "type": "rectangle",
+                    "x": 220,
+                    "y": 110,
+                    "width": 140,
+                    "height": 80
+                },
+                {
+                    "id": "d",
+                    "type": "rectangle",
+                    "x": 680,
+                    "y": 110,
+                    "width": 140,
+                    "height": 80
+                },
+                {
+                    "id": "e",
+                    "type": "rectangle",
+                    "x": 860,
+                    "y": 110,
+                    "width": 140,
+                    "height": 80
+                }
+            ]
+        }"#,
+    );
+
+    let z = scene.container("z").expect("zone z");
+    let z2 = scene.container("z2").expect("zone z2");
+    assert_eq!(z.title_element.as_deref(), Some("t"));
+    assert_eq!(z2.title_element.as_deref(), Some("t2"));
+    assert_eq!(z2.parent, None);
+}
