@@ -1,9 +1,15 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use clap::Parser;
 use excalidraw_spatial::formatter::{format_lint_json, format_lint_text};
 use excalidraw_spatial::linter::{run_lint, Severity};
+use excalidraw_spatial::mutator::ops::{
+    align, distribute, fit_container, fit_text, move_target, place,
+};
+use excalidraw_spatial::mutator::{apply, Change};
 use excalidraw_spatial::scene_graph::Scene;
 use excalidraw_spatial::schema::Document;
-use excalidraw_spatial::{not_implemented, Cli, Commands, LintFormat};
+use excalidraw_spatial::{not_implemented, Cli, Commands, LayoutCommands, LintFormat, OutputArgs};
 
 fn main() {
     let cli = Cli::parse();
@@ -13,7 +19,8 @@ fn main() {
             strict,
             format,
         } => lint_cmd(&file, strict, format),
-        Commands::Inspect { .. } | Commands::Layout { .. } => not_implemented(),
+        Commands::Inspect { .. } => not_implemented(),
+        Commands::Layout { command } => layout_cmd(command),
     };
     std::process::exit(code);
 }
@@ -40,5 +47,170 @@ fn lint_cmd(file: &str, strict: bool, format: LintFormat) -> i32 {
         1
     } else {
         0
+    }
+}
+
+fn layout_cmd(cmd: LayoutCommands) -> i32 {
+    let (file, output) = layout_io(&cmd);
+    if file == "-" && output.in_place {
+        eprintln!("excal: error: cannot use --in-place with stdin");
+        return 2;
+    }
+
+    let mut doc = match Document::load(file) {
+        Ok(doc) => doc,
+        Err(e) => {
+            eprintln!("excal: error: {e}");
+            return 2;
+        }
+    };
+    let old_scene = Scene::build(&doc);
+    let mut change = match layout_change(&old_scene, &cmd) {
+        Ok(change) => change,
+        Err(e) => {
+            eprintln!("excal: error: {e}");
+            return 2;
+        }
+    };
+    strip_nops(&mut change, &old_scene);
+
+    if change.is_empty() {
+        eprintln!("excal: nothing to change");
+        return write_output(file, output, &doc);
+    }
+
+    let report = match apply(&mut doc, &old_scene, &change) {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("excal: error: {e}");
+            return 2;
+        }
+    };
+    let now_ms = match now_ms() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("excal: error: {e}");
+            return 2;
+        }
+    };
+    doc.finish(now_ms);
+
+    let new_scene = Scene::build(&doc);
+    let lint_file = if file == "-" { "<file>" } else { file };
+    let issues = run_lint(&new_scene, lint_file);
+    let mut errors = 0;
+    let mut warnings = 0;
+    let mut info = 0;
+    for issue in &issues {
+        match issue.severity {
+            Severity::Error => errors += 1,
+            Severity::Warn => warnings += 1,
+            Severity::Info => info += 1,
+        }
+    }
+    eprintln!(
+        "excal: moved {} item(s), resized {} item(s), updated {} connector(s)",
+        report.moved, report.resized, report.connectors
+    );
+    eprintln!("excal: lint after change: errors: {errors}, warnings: {warnings}, info: {info}");
+    write_output(file, output, &doc)
+}
+
+fn layout_io(cmd: &LayoutCommands) -> (&str, &OutputArgs) {
+    match cmd {
+        LayoutCommands::Move { file, output, .. }
+        | LayoutCommands::Align { file, output, .. }
+        | LayoutCommands::Distribute { file, output, .. }
+        | LayoutCommands::Place { file, output, .. }
+        | LayoutCommands::FitContainer { file, output, .. }
+        | LayoutCommands::FitText { file, output, .. } => (file, output),
+    }
+}
+
+fn layout_change(scene: &Scene, cmd: &LayoutCommands) -> anyhow::Result<Change> {
+    match cmd {
+        LayoutCommands::Move { id, dx, dy, .. } => {
+            move_target(scene, id, dx.unwrap_or(0.0), dy.unwrap_or(0.0))
+        }
+        LayoutCommands::Align { ids, axis, .. } => align(scene, ids, axis.clone()),
+        LayoutCommands::Distribute {
+            ids,
+            direction,
+            gap,
+            ..
+        } => distribute(scene, ids, direction.clone(), *gap),
+        LayoutCommands::Place {
+            id,
+            right_of,
+            left_of,
+            below,
+            above,
+            gap,
+            align: place_align,
+            ..
+        } => place(
+            scene,
+            id,
+            right_of.as_deref(),
+            left_of.as_deref(),
+            below.as_deref(),
+            above.as_deref(),
+            *gap,
+            place_align.clone(),
+        ),
+        LayoutCommands::FitContainer { id, padding, .. } => fit_container(scene, id, *padding),
+        LayoutCommands::FitText {
+            id,
+            all,
+            padding_x,
+            padding_y,
+            ..
+        } => fit_text(scene, id.as_deref(), *all, *padding_x, *padding_y),
+    }
+}
+
+fn strip_nops(change: &mut Change, scene: &Scene) {
+    let mut seen = std::collections::HashSet::new();
+    change.moves.retain(|(id, dx, dy)| {
+        if *dx == 0.0 && *dy == 0.0 {
+            return false;
+        }
+        seen.insert(id.clone())
+    });
+    let mut seen_r = std::collections::HashSet::new();
+    change.resizes.retain(|(id, rect)| {
+        if let Some(cur) = scene.rect_of(id) {
+            if cur.x1 == rect.x1 && cur.y1 == rect.y1 && cur.x2 == rect.x2 && cur.y2 == rect.y2 {
+                return false;
+            }
+        }
+        seen_r.insert(id.clone())
+    });
+}
+
+fn now_ms() -> anyhow::Result<i64> {
+    if let Ok(v) = std::env::var("EXCAL_FIXED_NOW_MS") {
+        Ok(v.parse::<i64>()?)
+    } else {
+        Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64)
+    }
+}
+
+fn write_output(file: &str, output: &OutputArgs, doc: &Document) -> i32 {
+    let json = doc.to_json_string();
+    let result = if output.in_place {
+        std::fs::write(file, json)
+    } else if let Some(path) = &output.output {
+        std::fs::write(path, json)
+    } else {
+        print!("{json}");
+        return 0;
+    };
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("excal: error: {e}");
+            2
+        }
     }
 }

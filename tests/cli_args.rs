@@ -11,13 +11,6 @@ fn run(args: &[&str]) -> (i32, String, String) {
     (code, stdout, stderr)
 }
 
-fn stderr_is_not_implemented(stderr: &str) -> bool {
-    matches!(
-        stderr.strip_suffix('\n').unwrap_or(stderr),
-        "excal: error: not implemented"
-    )
-}
-
 #[test]
 fn help_lists_top_level_commands() {
     let (code, stdout, _stderr) = run(&["--help"]);
@@ -50,13 +43,13 @@ fn layout_help_lists_layout_commands() {
 }
 
 #[test]
-fn move_accepts_negative_dy_and_is_not_implemented() {
+fn move_accepts_negative_dy_and_fails_on_missing_file() {
     let (code, _stdout, stderr) =
         run(&["layout", "move", "f.excalidraw", "--id", "a", "--dy", "-20"]);
     assert_eq!(code, 2);
     assert!(
-        stderr_is_not_implemented(&stderr),
-        "expected exactly 'excal: error: not implemented' (optional trailing newline), got {stderr:?}"
+        stderr.starts_with("excal: error:"),
+        "negative dy must parse (clap errors do not use this prefix); got {stderr:?}"
     );
 }
 
