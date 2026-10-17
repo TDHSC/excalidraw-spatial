@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
 
 use crate::geometry::{Point, Rect};
@@ -18,6 +18,7 @@ pub struct Document {
     trailing_newline: bool,
     index: HashMap<String, usize>,
     touched: BTreeSet<String>,
+    created: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -142,7 +143,180 @@ impl Document {
             trailing_newline: src.ends_with('\n'),
             index,
             touched: BTreeSet::new(),
+            created: BTreeSet::new(),
         })
+    }
+
+    pub fn empty() -> Document {
+        let value = serde_json::json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [],
+            "appState": {
+                "gridSize": 20,
+                "gridStep": 5,
+                "gridModeEnabled": false,
+                "viewBackgroundColor": "#ffffff",
+                "lockedMultiSelections": {}
+            },
+            "files": {}
+        });
+        let (elements, index) = collect_elements(&value, false);
+        Document {
+            value,
+            elements,
+            trailing_newline: true,
+            index,
+            touched: BTreeSet::new(),
+            created: BTreeSet::new(),
+        }
+    }
+
+    pub fn refresh(&mut self) {
+        let (elements, index) = collect_elements(&self.value, false);
+        self.elements = elements;
+        self.index = index;
+    }
+
+    pub fn has_raw_id(&self, id: &str) -> bool {
+        self.value
+            .get("elements")
+            .and_then(|elements| elements.as_array())
+            .is_some_and(|elements| {
+                elements
+                    .iter()
+                    .any(|el| el.get("id").and_then(|raw| raw.as_str()) == Some(id))
+            })
+    }
+
+    pub fn insert_element(&mut self, pos: usize, el: serde_json::Value) {
+        let id = el
+            .get("id")
+            .and_then(|raw| raw.as_str())
+            .map(str::to_string);
+        if let Some(elements) = self
+            .value
+            .get_mut("elements")
+            .and_then(|e| e.as_array_mut())
+        {
+            let at = pos.min(elements.len());
+            elements.insert(at, el);
+        }
+        if let Some(id) = id {
+            self.created.insert(id);
+        }
+        self.refresh();
+    }
+
+    pub fn push_element(&mut self, el: serde_json::Value) {
+        let len = self
+            .value
+            .get("elements")
+            .and_then(|e| e.as_array())
+            .map(|e| e.len())
+            .unwrap_or(0);
+        self.insert_element(len, el);
+    }
+
+    pub fn remove_elements(&mut self, ids: &HashSet<String>) {
+        if let Some(elements) = self
+            .value
+            .get_mut("elements")
+            .and_then(|e| e.as_array_mut())
+        {
+            elements.retain(|el| {
+                el.get("id")
+                    .and_then(|raw| raw.as_str())
+                    .is_none_or(|id| !ids.contains(id))
+            });
+        }
+        self.touched.retain(|id| !ids.contains(id));
+        self.created.retain(|id| !ids.contains(id));
+        self.refresh();
+    }
+
+    pub fn set_value(&mut self, id: &str, key: &str, val: serde_json::Value) {
+        if let Some(el) = self.element_object_mut(id) {
+            el.insert(key.to_string(), val);
+            self.touched.insert(id.to_string());
+        }
+    }
+
+    pub fn push_bound_element(&mut self, id: &str, kind: &str, target_id: &str) {
+        let Some(el) = self.element_object_mut(id) else {
+            return;
+        };
+        let mut bound = match el.get("boundElements").and_then(|v| v.as_array()) {
+            Some(arr) => arr.clone(),
+            None => Vec::new(),
+        };
+        let duplicate = bound.iter().any(|entry| {
+            entry.get("id").and_then(|v| v.as_str()) == Some(target_id)
+                && entry.get("type").and_then(|v| v.as_str()) == Some(kind)
+        });
+        if !duplicate {
+            bound.push(serde_json::json!({"type": kind, "id": target_id}));
+            el.insert("boundElements".to_string(), serde_json::Value::Array(bound));
+        }
+    }
+
+    pub fn remove_bound_references(&mut self, removed_ids: &HashSet<String>) {
+        let Some(elements) = self
+            .value
+            .get_mut("elements")
+            .and_then(|e| e.as_array_mut())
+        else {
+            return;
+        };
+        let mut touched = Vec::new();
+        for el in elements.iter_mut() {
+            let Some(obj) = el.as_object_mut() else {
+                continue;
+            };
+            let id = obj
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if id.is_empty() || removed_ids.contains(&id) {
+                continue;
+            }
+            let mut changed = false;
+            if let Some(bound) = obj.get("boundElements").and_then(|v| v.as_array()) {
+                let filtered: Vec<serde_json::Value> = bound
+                    .iter()
+                    .filter(|entry| {
+                        entry
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .is_none_or(|bound_id| !removed_ids.contains(bound_id))
+                    })
+                    .cloned()
+                    .collect();
+                if filtered.len() != bound.len() {
+                    obj.insert(
+                        "boundElements".to_string(),
+                        serde_json::Value::Array(filtered),
+                    );
+                    changed = true;
+                }
+            }
+            if obj
+                .get("containerId")
+                .and_then(|v| v.as_str())
+                .is_some_and(|container_id| removed_ids.contains(container_id))
+            {
+                obj.insert("containerId".to_string(), serde_json::Value::Null);
+                changed = true;
+            }
+            if changed {
+                touched.push(id);
+            }
+        }
+        for id in touched {
+            self.touched.insert(id);
+        }
     }
 
     pub fn load(path: &str) -> anyhow::Result<Document> {
@@ -190,7 +364,15 @@ impl Document {
     pub fn finish(&mut self, now_ms: i64) {
         let ids: Vec<String> = self.touched.iter().cloned().collect();
         for id in ids {
+            let created = self.created.contains(&id);
             if let Some(el) = self.element_object_mut(&id) {
+                if created {
+                    el.insert(
+                        "updated".to_string(),
+                        serde_json::Value::Number(serde_json::Number::from(now_ms)),
+                    );
+                    continue;
+                }
                 let version = match el.get("version").and_then(|v| v.as_i64()) {
                     Some(n) => n + 1,
                     None => 1,
@@ -219,6 +401,7 @@ impl Document {
             }
         }
         self.touched.clear();
+        self.created.clear();
         let (elements, index) = collect_elements(&self.value, false);
         self.elements = elements;
         self.index = index;
@@ -260,4 +443,185 @@ fn collect_elements(
         }
     }
     (elements, index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW_MS: i64 = 1_700_000_000_000;
+
+    fn seed_doc() -> Document {
+        Document::parse(
+            r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://excalidraw.com",
+  "elements": [
+    {
+      "id": "old",
+      "type": "rectangle",
+      "x": 0,
+      "y": 0,
+      "width": 10,
+      "height": 10,
+      "version": 3,
+      "versionNonce": 11,
+      "updated": 1,
+      "boundElements": null,
+      "containerId": "gone"
+    }
+  ],
+  "appState": {},
+  "files": {}
+}
+"#,
+        )
+        .expect("parse")
+    }
+
+    fn element<'a>(doc: &'a Document, id: &str) -> &'a serde_json::Value {
+        doc.value["elements"]
+            .as_array()
+            .expect("elements")
+            .iter()
+            .find(|el| el["id"] == id)
+            .unwrap_or_else(|| panic!("missing {id}"))
+    }
+
+    #[test]
+    fn created_element_keeps_version_when_touched_before_finish() {
+        let mut doc = seed_doc();
+        let old_nonce = element(&doc, "old")["versionNonce"].clone();
+        let old_version = element(&doc, "old")["version"].as_i64().expect("version");
+
+        let created = serde_json::json!({
+            "id": "new",
+            "type": "rectangle",
+            "x": 1,
+            "y": 2,
+            "version": 1,
+            "versionNonce": 99,
+            "updated": 0
+        });
+        doc.push_element(created);
+        doc.set_num("new", "x", 40.0);
+        doc.set_num("old", "x", 8.0);
+        doc.finish(NOW_MS);
+
+        let created_el = element(&doc, "new");
+        assert_eq!(created_el["version"], 1);
+        assert_eq!(created_el["versionNonce"], 99);
+        assert_eq!(created_el["updated"], NOW_MS);
+        assert_eq!(created_el["x"], 40);
+
+        let old_el = element(&doc, "old");
+        assert_eq!(old_el["version"], old_version + 1);
+        assert_ne!(old_el["versionNonce"], old_nonce);
+        assert_eq!(old_el["updated"], NOW_MS);
+    }
+
+    #[test]
+    fn empty_document_matches_authoring_template() {
+        let doc = Document::empty();
+        assert!(doc.to_json_string().ends_with('\n'));
+        let value: serde_json::Value = serde_json::from_str(&doc.to_json_string()).expect("json");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "excalidraw",
+                "version": 2,
+                "source": "https://excalidraw.com",
+                "elements": [],
+                "appState": {
+                    "gridSize": 20,
+                    "gridStep": 5,
+                    "gridModeEnabled": false,
+                    "viewBackgroundColor": "#ffffff",
+                    "lockedMultiSelections": {}
+                },
+                "files": {}
+            })
+        );
+    }
+
+    #[test]
+    fn insert_push_remove_and_refresh_track_created_ids() {
+        let mut doc = Document::empty();
+        doc.push_element(serde_json::json!({"id": "a", "type": "rectangle", "version": 1}));
+        doc.insert_element(
+            0,
+            serde_json::json!({"id": "b", "type": "text", "version": 1}),
+        );
+        assert!(doc.has_raw_id("a"));
+        assert!(doc.has_raw_id("b"));
+        assert_eq!(doc.elements[0].id, "b");
+        assert_eq!(doc.elements[1].id, "a");
+
+        let mut removed = std::collections::HashSet::new();
+        removed.insert("a".to_string());
+        doc.remove_elements(&removed);
+        assert!(!doc.has_raw_id("a"));
+        assert_eq!(doc.elements.len(), 1);
+
+        doc.value["elements"]
+            .as_array_mut()
+            .expect("elements")
+            .push(serde_json::json!({"id": "raw", "type": "rectangle"}));
+        doc.refresh();
+        assert!(doc.has_raw_id("raw"));
+        assert_eq!(doc.element("raw").map(|el| el.id.as_str()), Some("raw"));
+    }
+
+    #[test]
+    fn push_bound_element_does_not_touch_and_skips_duplicates() {
+        let mut doc = seed_doc();
+        doc.push_bound_element("old", "text", "old-label");
+        doc.push_bound_element("old", "text", "old-label");
+        doc.push_bound_element("old", "arrow", "a1");
+        doc.finish(NOW_MS);
+
+        let bound = &element(&doc, "old")["boundElements"];
+        assert_eq!(
+            bound,
+            &serde_json::json!([
+                {"type": "text", "id": "old-label"},
+                {"type": "arrow", "id": "a1"}
+            ])
+        );
+        assert_eq!(element(&doc, "old")["version"], 3);
+    }
+
+    #[test]
+    fn remove_bound_references_clears_links_and_marks_touched() {
+        let mut doc = seed_doc();
+        doc.push_element(serde_json::json!({
+            "id": "label",
+            "type": "text",
+            "version": 1,
+            "versionNonce": 5,
+            "containerId": "gone",
+            "boundElements": [{"type": "arrow", "id": "gone"}]
+        }));
+        doc.set_value(
+            "old",
+            "boundElements",
+            serde_json::json!([{"type": "text", "id": "label"}, {"type": "arrow", "id": "gone"}]),
+        );
+        let mut removed = std::collections::HashSet::new();
+        removed.insert("gone".to_string());
+        doc.remove_bound_references(&removed);
+        doc.finish(NOW_MS);
+
+        assert_eq!(
+            element(&doc, "old")["boundElements"],
+            serde_json::json!([{"type": "text", "id": "label"}])
+        );
+        assert!(element(&doc, "old")["version"].as_i64().expect("version") > 3);
+        assert_eq!(
+            element(&doc, "label")["containerId"],
+            serde_json::Value::Null
+        );
+        assert_eq!(element(&doc, "label")["version"], 1);
+    }
 }

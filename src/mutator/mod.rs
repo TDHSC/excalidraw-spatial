@@ -7,6 +7,7 @@ use crate::geometry::Rect;
 use crate::scene_graph::{ComponentKind, ContainerKind, Scene};
 use crate::schema::Document;
 use crate::text_metrics::text_size;
+use crate::LayoutCommands;
 
 use self::sync_bindings::{bound_text_xy, sync_arrows};
 
@@ -27,6 +28,72 @@ pub struct ApplyReport {
     pub moved: usize,
     pub resized: usize,
     pub connectors: usize,
+}
+
+pub fn layout_change(scene: &Scene, cmd: &LayoutCommands) -> anyhow::Result<Change> {
+    match cmd {
+        LayoutCommands::Move { id, dx, dy, .. } => {
+            ops::move_target(scene, id, dx.unwrap_or(0.0), dy.unwrap_or(0.0))
+        }
+        LayoutCommands::Align { ids, axis, .. } => ops::align(scene, ids, axis.clone()),
+        LayoutCommands::Distribute {
+            ids,
+            direction,
+            gap,
+            ..
+        } => ops::distribute(scene, ids, direction.clone(), *gap),
+        LayoutCommands::Place {
+            id,
+            right_of,
+            left_of,
+            below,
+            above,
+            gap,
+            align: place_align,
+            ..
+        } => ops::place(
+            scene,
+            id,
+            right_of.as_deref(),
+            left_of.as_deref(),
+            below.as_deref(),
+            above.as_deref(),
+            *gap,
+            place_align.clone(),
+        ),
+        LayoutCommands::FitContainer {
+            id,
+            padding,
+            expand_only,
+            ..
+        } => ops::fit_container(scene, id, *padding, *expand_only),
+        LayoutCommands::FitText {
+            id,
+            all,
+            padding_x,
+            padding_y,
+            ..
+        } => ops::fit_text(scene, id.as_deref(), *all, *padding_x, *padding_y),
+    }
+}
+
+pub fn strip_nops(change: &mut Change, scene: &Scene) {
+    let mut seen = std::collections::HashSet::new();
+    change.moves.retain(|(id, dx, dy)| {
+        if *dx == 0.0 && *dy == 0.0 {
+            return false;
+        }
+        seen.insert(id.clone())
+    });
+    let mut seen_r = std::collections::HashSet::new();
+    change.resizes.retain(|(id, rect)| {
+        if let Some(cur) = scene.rect_of(id) {
+            if cur.x1 == rect.x1 && cur.y1 == rect.y1 && cur.x2 == rect.x2 && cur.y2 == rect.y2 {
+                return false;
+            }
+        }
+        seen_r.insert(id.clone())
+    });
 }
 
 pub fn apply(

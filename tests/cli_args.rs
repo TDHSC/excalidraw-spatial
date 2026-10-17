@@ -111,3 +111,156 @@ fn fit_text_requires_id_or_all() {
         "clap error must not print not implemented, got {stderr:?}"
     );
 }
+
+#[test]
+fn help_lists_draw_among_top_level_commands() {
+    let (code, stdout, _stderr) = run(&["--help"]);
+    assert_eq!(code, 0);
+    for name in ["draw", "inspect", "lint", "layout"] {
+        assert!(stdout.contains(name), "stdout missing {name}:\n{stdout}");
+    }
+}
+
+#[test]
+fn draw_help_lists_authoring_commands() {
+    let (code, stdout, _stderr) = run(&["draw", "--help"]);
+    assert_eq!(code, 0);
+    for name in [
+        "init", "node", "connect", "route", "zone", "frame", "text", "label", "remove", "batch",
+    ] {
+        assert!(stdout.contains(name), "stdout missing {name}:\n{stdout}");
+    }
+}
+
+#[test]
+fn draw_subcommand_aliases_parse() {
+    for args in [
+        &["draw", "arrow", "--help"][..],
+        &["draw", "rm", "--help"][..],
+        &["draw", "delete", "--help"][..],
+        &["draw", "reroute", "--help"][..],
+    ] {
+        let (code, stdout, stderr) = run(args);
+        assert_eq!(code, 0, "args={args:?} stdout={stdout:?} stderr={stderr:?}");
+    }
+}
+
+#[test]
+fn draw_node_requires_y_with_x() {
+    let (code, _stdout, stderr) = run(&["draw", "node", "f.excalidraw", "--id", "a", "--x", "10"]);
+    assert_eq!(code, 2);
+    assert!(
+        !stderr.contains("not implemented"),
+        "clap error must not print not implemented, got {stderr:?}"
+    );
+}
+
+#[test]
+fn draw_node_rejects_explicit_coords_with_relative_direction() {
+    let (code, _stdout, stderr) = run(&[
+        "draw",
+        "node",
+        "f.excalidraw",
+        "--id",
+        "a",
+        "--x",
+        "10",
+        "--y",
+        "20",
+        "--right-of",
+        "b",
+    ]);
+    assert_eq!(code, 2);
+    assert!(
+        !stderr.contains("not implemented"),
+        "clap error must not print not implemented, got {stderr:?}"
+    );
+}
+
+#[test]
+fn draw_node_rejects_multiple_relative_directions() {
+    let (code, _stdout, stderr) = run(&[
+        "draw",
+        "node",
+        "f.excalidraw",
+        "--id",
+        "a",
+        "--right-of",
+        "b",
+        "--below",
+        "c",
+    ]);
+    assert_eq!(code, 2);
+    assert!(
+        !stderr.contains("not implemented"),
+        "clap error must not print not implemented, got {stderr:?}"
+    );
+}
+
+#[test]
+fn draw_zone_requires_children_or_rect() {
+    let (code, _stdout, stderr) =
+        run(&["draw", "zone", "f.excalidraw", "--id", "z", "--title", "T"]);
+    assert_eq!(code, 2);
+    assert!(
+        !stderr.contains("not implemented"),
+        "clap error must not print not implemented, got {stderr:?}"
+    );
+}
+
+#[test]
+fn draw_zone_rejects_children_with_explicit_rect() {
+    let (code, _stdout, stderr) = run(&[
+        "draw",
+        "zone",
+        "f.excalidraw",
+        "--id",
+        "z",
+        "--title",
+        "T",
+        "--children",
+        "a",
+        "--x",
+        "0",
+        "--y",
+        "0",
+        "--width",
+        "100",
+        "--height",
+        "100",
+    ]);
+    assert_eq!(code, 2);
+    assert!(
+        !stderr.contains("not implemented"),
+        "clap error must not print not implemented, got {stderr:?}"
+    );
+}
+
+#[test]
+fn draw_frame_requires_children_or_rect() {
+    let (code, _stdout, stderr) = run(&["draw", "frame", "f.excalidraw", "--id", "f"]);
+    assert_eq!(code, 2);
+    assert!(
+        !stderr.contains("not implemented"),
+        "clap error must not print not implemented, got {stderr:?}"
+    );
+}
+
+#[test]
+fn draw_node_rejects_in_place_with_output_path() {
+    let (code, _stdout, stderr) = run(&[
+        "draw",
+        "node",
+        "f.excalidraw",
+        "--id",
+        "a",
+        "--in-place",
+        "-o",
+        "out.json",
+    ]);
+    assert_eq!(code, 2);
+    assert!(
+        !stderr.contains("not implemented"),
+        "clap error must not print not implemented, got {stderr:?}"
+    );
+}

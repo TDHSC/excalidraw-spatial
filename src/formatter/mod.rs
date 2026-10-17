@@ -302,9 +302,8 @@ fn sibling_groups(scene: &Scene) -> Vec<Vec<&Component>> {
     ordered
 }
 
-pub fn format_lint_text(issues: &[LintIssue]) -> String {
+pub fn format_lint_issues_only(issues: &[LintIssue]) -> String {
     let mut out = String::new();
-    let summary = count_severities(issues);
     for issue in issues {
         let sev = match issue.severity {
             Severity::Error => "ERROR",
@@ -328,6 +327,12 @@ pub fn format_lint_text(issues: &[LintIssue]) -> String {
             out.push('\n');
         }
     }
+    out
+}
+
+pub fn format_lint_text(issues: &[LintIssue]) -> String {
+    let summary = count_severities(issues);
+    let mut out = format_lint_issues_only(issues);
     out.push_str(&format!(
         "errors: {}, warnings: {}, info: {}\n",
         summary.errors, summary.warnings, summary.info
