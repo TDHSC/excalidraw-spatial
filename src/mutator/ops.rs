@@ -18,15 +18,30 @@ enum RetainPolicy {
     Position,
 }
 
-pub fn move_target(scene: &Scene, id: &str, dx: f64, dy: f64) -> anyhow::Result<Change> {
+pub fn move_target(
+    scene: &Scene,
+    id: &str,
+    dx: f64,
+    dy: f64,
+    ripple: bool,
+) -> anyhow::Result<Change> {
     let resolved = match scene.resolve(id)? {
         Target::Component(id) | Target::Container(id) | Target::Connector(id) => id,
     };
+    let mut moves = vec![(resolved.clone(), dx, dy)];
+    let policy = if ripple {
+        for r_id in spatial::ripple_targets(scene, &resolved, dx, dy) {
+            moves.push((r_id, dx, dy));
+        }
+        RetainPolicy::Arrange
+    } else {
+        RetainPolicy::Position
+    };
     let mut change = Change {
-        moves: vec![(resolved, dx, dy)],
+        moves,
         resizes: vec![],
     };
-    retain_zone_membership(scene, &mut change, RetainPolicy::Position);
+    retain_zone_membership(scene, &mut change, policy);
     Ok(change)
 }
 
@@ -450,8 +465,11 @@ fn retain_zone_membership(scene: &Scene, change: &mut Change, policy: RetainPoli
         let mut resized: Vec<&crate::scene_graph::Container> = scene
             .containers
             .iter()
-            .filter(|container| container.kind == ContainerKind::Zone)
-            .filter(|container| grown[&container.id] != container.rect)
+            .filter(|container| {
+                grown
+                    .get(&container.id)
+                    .is_some_and(|rect| *rect != container.rect)
+            })
             .collect();
         resized.sort_by_key(|container| container.z);
         for zone in resized {
@@ -465,7 +483,6 @@ fn seed_grown(scene: &Scene) -> HashMap<String, Rect> {
     scene
         .containers
         .iter()
-        .filter(|container| container.kind == ContainerKind::Zone)
         .map(|container| (container.id.clone(), container.rect))
         .collect()
 }
@@ -500,40 +517,45 @@ fn grow_membership(
         let Some(parent_zone) = scene.container(&parent_id) else {
             continue;
         };
-        if parent_zone.kind != ContainerKind::Zone {
-            continue;
-        }
         if pinned_or_ancestor(scene, pinned, &parent_id) {
             continue;
         }
         let moved = rect.translate(*dx, *dy);
-        if zone_admits(&parent_zone.rect, parent_zone.z, &moved, z, k_is_zone) {
-            continue;
-        }
-        // A pushed sibling is translated to stay clear, not to leave its parent.
-        let item_policy = if pushed_ids.contains(id) {
-            RetainPolicy::Arrange
-        } else {
-            policy
-        };
-        if item_policy == RetainPolicy::Position
-            && intentional_exit(
-                scene,
-                parent_zone.rect,
-                &moved,
-                z,
-                k_is_zone,
-                id,
-                &parent_id,
-            )
+        if parent_zone.kind == ContainerKind::Zone
+            && !zone_admits(&parent_zone.rect, parent_zone.z, &moved, z, k_is_zone)
         {
+            // A pushed sibling is translated to stay clear, not to leave its parent.
+            let item_policy = if pushed_ids.contains(id) {
+                RetainPolicy::Arrange
+            } else {
+                policy
+            };
+            if item_policy == RetainPolicy::Position
+                && intentional_exit(
+                    scene,
+                    parent_zone.rect,
+                    &moved,
+                    z,
+                    k_is_zone,
+                    id,
+                    &parent_id,
+                )
+            {
+                continue;
+            }
+            grow_crossed(
+                grown.get_mut(&parent_id).expect("zone seeded"),
+                parent_zone,
+                moved,
+                k_is_zone,
+            );
             continue;
         }
-        grow_crossed(
-            grown.get_mut(&parent_id).expect("zone seeded"),
+        grow_edge_margin(
+            grown.get_mut(&parent_id).expect("container seeded"),
             parent_zone,
+            rect,
             moved,
-            k_is_zone,
         );
     }
 
@@ -893,6 +915,27 @@ fn title_extra(zone: &Container) -> f64 {
         zone.title_height.unwrap_or(0.0) + 10.0
     } else {
         0.0
+    }
+}
+
+fn grow_edge_margin(grown: &mut Rect, parent: &Container, rect: Rect, moved: Rect) {
+    let gap = f64::from(MIN_GAP);
+    let title = if parent.kind == ContainerKind::Frame {
+        0.0
+    } else {
+        title_extra(parent)
+    };
+    if moved.x1 < rect.x1 - 1e-9 && moved.x1 - gap < grown.x1 {
+        grown.x1 = grown.x1.min(moved.x1 - gap);
+    }
+    if moved.x2 > rect.x2 + 1e-9 && moved.x2 + gap > grown.x2 {
+        grown.x2 = grown.x2.max(moved.x2 + gap);
+    }
+    if moved.y1 < rect.y1 - 1e-9 && moved.y1 - gap - title < grown.y1 {
+        grown.y1 = grown.y1.min(moved.y1 - gap - title);
+    }
+    if moved.y2 > rect.y2 + 1e-9 && moved.y2 + gap > grown.y2 {
+        grown.y2 = grown.y2.max(moved.y2 + gap);
     }
 }
 

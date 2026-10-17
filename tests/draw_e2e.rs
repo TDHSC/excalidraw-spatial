@@ -482,6 +482,74 @@ fn stderr_actionable_lint_closed_loop_repair() {
 }
 
 #[test]
+fn ripple_move_cotranslates_downstream_and_grows_zone() {
+    let (path, path_s) = fresh_file("b26-ripple.excalidraw");
+    let script = "\
+node --id checkout --label \"Checkout\" --x 100 --y 100 --width 200 --height 80
+node --id api_gw --label \"API GW\" --right-of checkout --gap 120 --width 200 --height 80
+node --id risk_eng --label \"Risk\" --right-of api_gw --gap 120 --width 200 --height 80
+zone --id z_edge --title \"Edge\" --children checkout,api_gw,risk_eng
+connect --from api_gw --to risk_eng --id score --label \"score()\"
+";
+    let (code, stdout, stderr) = batch_in_place(&path_s, script);
+    assert_eq!(code, 0, "batch stdout={stdout:?} stderr={stderr:?}");
+
+    let (code, stdout, stderr) = run(&[
+        "draw",
+        "connect",
+        &path_s,
+        "--from",
+        "checkout",
+        "--to",
+        "api_gw",
+        "--id",
+        "ca",
+        "--label",
+        "POST /v1/charges",
+        "--in-place",
+    ]);
+    assert_eq!(code, 0, "connect stdout={stdout:?} stderr={stderr:?}");
+    assert!(
+        stderr.contains("ERROR ARROW_LABEL_COLLISION"),
+        "stderr={stderr}"
+    );
+    let expected_run = format!("run: excal layout move {path_s} --id api_gw --dx 54 --ripple");
+    assert!(
+        stderr.contains(&expected_run),
+        "stderr missing {expected_run:?}:\n{stderr}"
+    );
+
+    let run_line = stderr
+        .lines()
+        .find(|line| line.contains(&expected_run))
+        .expect("run line");
+    let command = run_line.trim().trim_start_matches("run: ").trim();
+    let mut args: Vec<&str> = command.split_whitespace().skip(1).collect();
+    args.push("--in-place");
+    let (code, stdout, fix_err) = run(&args);
+    assert_eq!(code, 0, "move stdout={stdout:?} stderr={fix_err:?}");
+    assert!(
+        fix_err.contains("moved 2 item(s), resized 1 item(s)"),
+        "stderr={fix_err}"
+    );
+
+    let doc = load_doc(&path);
+    assert_eq!(num(&element(&doc, "api_gw")["x"]), 474.0);
+    assert_eq!(num(&element(&doc, "risk_eng")["x"]), 794.0);
+    assert_eq!(
+        num(&element(&doc, "z_edge")["x"]) + num(&element(&doc, "z_edge")["width"]),
+        1034.0
+    );
+    let (lint_code, lint_out, lint_err) = run(&["lint", &path_s, "--format", "json"]);
+    assert_eq!(lint_code, 0, "lint stdout={lint_out} stderr={lint_err}");
+    let lint: serde_json::Value = serde_json::from_str(&lint_out).expect("lint json");
+    assert_eq!(lint["summary"]["errors"], 0, "lint={lint_out}");
+    assert_eq!(lint["summary"]["warnings"], 0, "lint={lint_out}");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn byte_for_byte_determinism() {
     let (first, first_s) = fresh_file("det-a.excalidraw");
     let (second, second_s) = fresh_file("det-b.excalidraw");

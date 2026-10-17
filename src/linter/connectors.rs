@@ -139,7 +139,7 @@ pub fn arrow_label_collision(scene: &Scene, file: &str) -> Vec<LintIssue> {
                             }
                             _ => (sp, ep),
                         };
-                        lengthen_fix(file, end_target, start_pt, end_pt, dx, dy)
+                        lengthen_fix(scene, file, end_target, start_pt, end_pt, dx, dy)
                     } else {
                         (format!("move the label or {}", x.id), None)
                     }
@@ -213,6 +213,7 @@ fn attach_str(attach: &Attach) -> String {
 }
 
 fn lengthen_fix(
+    scene: &Scene,
     file: &str,
     end_target: &str,
     start: Point,
@@ -226,16 +227,18 @@ fn lengthen_fix(
     if (horizontal && end.x < start.x) || (!horizontal && end.y < start.y) {
         n = -n;
     }
-    let (axis, flag) = if horizontal {
-        ("x", "--dx")
+    let (axis, flag, move_dx, move_dy) = if horizontal {
+        ("x", "--dx", n as f64, 0.0)
     } else {
-        ("y", "--dy")
+        ("y", "--dy", 0.0, n as f64)
     };
+    let mut command = format!("excal layout move {file} --id {end_target} {flag} {n}");
+    if !crate::spatial::ripple_targets(scene, end_target, move_dx, move_dy).is_empty() {
+        command.push_str(" --ripple");
+    }
     (
         format!("lengthen the arrow: move {end_target} by {n}px along {axis}"),
-        Some(format!(
-            "excal layout move {file} --id {end_target} {flag} {n}"
-        )),
+        Some(command),
     )
 }
 

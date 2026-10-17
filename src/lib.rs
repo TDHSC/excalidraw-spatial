@@ -101,6 +101,8 @@ pub enum LayoutCommands {
         dx: Option<f64>,
         #[arg(long, allow_negative_numbers = true)]
         dy: Option<f64>,
+        #[arg(long)]
+        ripple: bool,
         #[command(flatten)]
         output: OutputArgs,
     },

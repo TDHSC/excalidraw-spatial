@@ -611,6 +611,56 @@ fn fixture_f21() -> String {
 }
 
 #[test]
+fn overlap_component_appends_ripple_only_when_downstream_siblings_exist() {
+    let with_c = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "a", "x": 0, "y": 0, "width": 160, "height": 80},
+    {"type": "rectangle", "id": "b", "x": 140, "y": 0, "width": 160, "height": 80},
+    {"type": "rectangle", "id": "c", "x": 360, "y": 0, "width": 160, "height": 80}
+  ]
+}"#;
+    let dir = make_temp_dir("b26-ripple");
+    fs::write(dir.join("f.excalidraw"), with_c).expect("write overlap");
+    let v = lint_json_in(&dir);
+    let hits = issues_with_rule(&v, "OVERLAP_COMPONENT");
+    assert_eq!(
+        hits.len(),
+        1,
+        "issues={}",
+        serde_json::to_string_pretty(&v["issues"]).unwrap()
+    );
+    assert_eq!(
+        hits[0]["command"],
+        "excal layout move f.excalidraw --id b --dx 60 --ripple"
+    );
+
+    let without_c = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "a", "x": 0, "y": 0, "width": 160, "height": 80},
+    {"type": "rectangle", "id": "b", "x": 140, "y": 0, "width": 160, "height": 80}
+  ]
+}"#;
+    fs::write(dir.join("f.excalidraw"), without_c).expect("rewrite overlap");
+    let v = lint_json_in(&dir);
+    let _ = fs::remove_dir_all(&dir);
+    let hits = issues_with_rule(&v, "OVERLAP_COMPONENT");
+    assert_eq!(
+        hits.len(),
+        1,
+        "issues={}",
+        serde_json::to_string_pretty(&v["issues"]).unwrap()
+    );
+    assert_eq!(
+        hits[0]["command"],
+        "excal layout move f.excalidraw --id b --dx 60"
+    );
+}
+
+#[test]
 fn b21_fixture_f21_uneven_spacing_does_not_cross_nested_zone() {
     let dir = make_temp_dir("b21");
     let path = dir.join("f.excalidraw");

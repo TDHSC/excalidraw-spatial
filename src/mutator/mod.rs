@@ -32,9 +32,9 @@ pub struct ApplyReport {
 
 pub fn layout_change(scene: &Scene, cmd: &LayoutCommands) -> anyhow::Result<Change> {
     match cmd {
-        LayoutCommands::Move { id, dx, dy, .. } => {
-            ops::move_target(scene, id, dx.unwrap_or(0.0), dy.unwrap_or(0.0))
-        }
+        LayoutCommands::Move {
+            id, dx, dy, ripple, ..
+        } => ops::move_target(scene, id, dx.unwrap_or(0.0), dy.unwrap_or(0.0), *ripple),
         LayoutCommands::Align { ids, axis, .. } => ops::align(scene, ids, axis.clone()),
         LayoutCommands::Distribute {
             ids,

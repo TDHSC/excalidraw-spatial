@@ -1,7 +1,15 @@
 use crate::geometry::{ceil_px, fmt_px};
 use crate::linter::{disp, LintIssue, Severity, CONTAINER_WARN_PADDING, MIN_GAP};
 use crate::scene_graph::{Component, ComponentKind, Container, Scene};
-use crate::spatial::children;
+use crate::spatial::{self, children};
+
+fn with_ripple(command: String, scene: &Scene, id: &str, dx: f64, dy: f64) -> String {
+    if spatial::ripple_targets(scene, id, dx, dy).is_empty() {
+        command
+    } else {
+        format!("{command} --ripple")
+    }
+}
 
 pub fn overlap_component(scene: &Scene, file: &str) -> Vec<LintIssue> {
     let mut issues = Vec::new();
@@ -32,17 +40,28 @@ pub fn overlap_component(scene: &Scene, file: &str) -> Vec<LintIssue> {
                 (aa, bb, n, false)
             };
             let n_s = fmt_px(n);
-            let (fix, command) = if horizontal {
+            let (fix, move_dx, move_dy, flag) = if horizontal {
                 (
                     format!("move {} right by {n_s}px to leave a 40px gap", second.id),
-                    format!("excal layout move {file} --id {} --dx {n_s}", second.id),
+                    n,
+                    0.0,
+                    "--dx",
                 )
             } else {
                 (
                     format!("move {} down by {n_s}px to leave a 40px gap", second.id),
-                    format!("excal layout move {file} --id {} --dy {n_s}", second.id),
+                    0.0,
+                    n,
+                    "--dy",
                 )
             };
+            let command = with_ripple(
+                format!("excal layout move {file} --id {} {flag} {n_s}", second.id),
+                scene,
+                &second.id,
+                move_dx,
+                move_dy,
+            );
             issues.push(LintIssue {
                 rule: "OVERLAP_COMPONENT",
                 severity: Severity::Error,
@@ -94,17 +113,28 @@ pub fn overlap_component(scene: &Scene, file: &str) -> Vec<LintIssue> {
                 (aa, bb, n, false)
             };
             let n_s = fmt_px(n);
-            let (fix, command) = if horizontal {
+            let (fix, move_dx, move_dy, flag) = if horizontal {
                 (
                     format!("move {} right by {n_s}px to leave a 40px gap", second.id),
-                    format!("excal layout move {file} --id {} --dx {n_s}", second.id),
+                    n,
+                    0.0,
+                    "--dx",
                 )
             } else {
                 (
                     format!("move {} down by {n_s}px to leave a 40px gap", second.id),
-                    format!("excal layout move {file} --id {} --dy {n_s}", second.id),
+                    0.0,
+                    n,
+                    "--dy",
                 )
             };
+            let command = with_ripple(
+                format!("excal layout move {file} --id {} {flag} {n_s}", second.id),
+                scene,
+                &second.id,
+                move_dx,
+                move_dy,
+            );
             issues.push(LintIssue {
                 rule: "OVERLAP_COMPONENT",
                 severity: Severity::Error,
@@ -141,10 +171,12 @@ pub fn overlap_component(scene: &Scene, file: &str) -> Vec<LintIssue> {
             let (dx, dy) = container.rect.overlap_depth(&n.rect);
             let (dir, n_move, flag, signed) = push_node_away(container, n, dx, dy);
             let n_s = fmt_px(n_move);
-            let signed_s = if signed {
-                format!("-{n_s}")
+            let signed_n = if signed { -n_move } else { n_move };
+            let signed_s = fmt_px(signed_n);
+            let (move_dx, move_dy) = if flag == "--dx" {
+                (signed_n, 0.0)
             } else {
-                n_s.clone()
+                (0.0, signed_n)
             };
             issues.push(LintIssue {
                 rule: "OVERLAP_COMPONENT",
@@ -161,9 +193,12 @@ pub fn overlap_component(scene: &Scene, file: &str) -> Vec<LintIssue> {
                     "move {} {dir} by {n_s}px to leave a 40px gap",
                     n.id
                 )),
-                command: Some(format!(
-                    "excal layout move {file} --id {} {flag} {signed_s}",
-                    n.id
+                command: Some(with_ripple(
+                    format!("excal layout move {file} --id {} {flag} {signed_s}", n.id),
+                    scene,
+                    &n.id,
+                    move_dx,
+                    move_dy,
                 )),
             });
         }

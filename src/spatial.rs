@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::geometry::Rect;
 use crate::linter::NEAR_MISS_MAX;
-use crate::scene_graph::{Component, Scene};
+use crate::scene_graph::{Component, ComponentKind, Scene};
 
 const ALIGN_PX: f64 = 0.5;
 
@@ -503,6 +503,69 @@ pub fn children(scene: &Scene, container_id: &str) -> Vec<(String, Rect)> {
         .chain(containers)
         .map(|(_, id, rect)| (id, rect))
         .collect()
+}
+
+pub fn ripple_targets(scene: &Scene, id: &str, dx: f64, dy: f64) -> Vec<String> {
+    if dx.abs() <= 1e-9 && dy.abs() <= 1e-9 {
+        return Vec::new();
+    }
+    let (anchor_rect, parent) = if let Some(component) = scene.component(id) {
+        if component.kind == ComponentKind::Text {
+            return Vec::new();
+        }
+        (component.rect, component.parent.clone())
+    } else if let Some(container) = scene.container(id) {
+        (container.rect, container.parent.clone())
+    } else {
+        return Vec::new();
+    };
+    let horizontal = dx.abs() >= dy.abs();
+    let mut hits: Vec<(usize, String)> = Vec::new();
+    for component in scene.nodes() {
+        if component.id == id || component.parent != parent {
+            continue;
+        }
+        if component.kind != ComponentKind::Shape && component.kind != ComponentKind::Group {
+            continue;
+        }
+        if downstream(&component.rect, &anchor_rect, dx, dy, horizontal) {
+            hits.push((component.z, component.id.clone()));
+        }
+    }
+    for container in &scene.containers {
+        if container.id == id || container.parent != parent {
+            continue;
+        }
+        if downstream(&container.rect, &anchor_rect, dx, dy, horizontal) {
+            hits.push((container.z, container.id.clone()));
+        }
+    }
+    hits.sort_by_key(|(z, _)| *z);
+    hits.into_iter().map(|(_, id)| id).collect()
+}
+
+fn downstream(rect: &Rect, anchor: &Rect, dx: f64, dy: f64, horizontal: bool) -> bool {
+    if horizontal {
+        let overlaps = rect.y1 < anchor.y2 && anchor.y1 < rect.y2;
+        let center = rect.center().x;
+        let anchor_center = anchor.center().x;
+        overlaps
+            && if dx > 0.0 {
+                center > anchor_center + 0.5
+            } else {
+                center < anchor_center - 0.5
+            }
+    } else {
+        let overlaps = rect.x1 < anchor.x2 && anchor.x1 < rect.x2;
+        let center = rect.center().y;
+        let anchor_center = anchor.center().y;
+        overlaps
+            && if dy > 0.0 {
+                center > anchor_center + 0.5
+            } else {
+                center < anchor_center - 0.5
+            }
+    }
 }
 
 pub fn padding(scene: &Scene, container_id: &str) -> Option<Padding> {

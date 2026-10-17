@@ -1793,6 +1793,169 @@ fn distribute_push_cascades_into_enclosing_parent_zone() {
 }
 
 #[test]
+fn edge_margin_zone_grows_when_center_stays_inside() {
+    let path = temp_path("b25-distribute-gap80.excalidraw");
+    fs::write(&path, lane_with_three_boxes()).expect("write lane");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "distribute",
+        path_str,
+        "--ids",
+        "a,b,c",
+        "--direction",
+        "horizontal",
+        "--gap",
+        "80",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: moved 2 item(s), resized 1 item(s), updated 0 connector(s)"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("excal: lint after change: errors: 0, warnings: 0, info: 0"),
+        "stderr={stderr}"
+    );
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "c"), "x"), 480.0);
+    let zone = element(&out, "z");
+    approx(num(zone, "x"), 0.0);
+    approx(num(zone, "y"), 0.0);
+    approx(num(zone, "width"), 660.0);
+    approx(num(zone, "height"), 300.0);
+
+    let path = temp_path("b25-move-dx100.excalidraw");
+    fs::write(&path, lane_with_three_boxes()).expect("write lane");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) =
+        run_layout(&["layout", "move", path_str, "--id", "c", "--dx", "100"]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("resized 1 item(s)"), "stderr={stderr}");
+    assert!(
+        stderr.contains("excal: lint after change: errors: 0"),
+        "stderr={stderr}"
+    );
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "c"), "x"), 500.0);
+    approx(num(element(&out, "z"), "width"), 680.0);
+
+    let path = temp_path("b25-move-up.excalidraw");
+    fs::write(&path, lane_with_three_boxes()).expect("write lane");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) =
+        run_layout(&["layout", "move", path_str, "--id", "a", "--dy", "-140"]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: lint after change: errors: 0"),
+        "stderr={stderr}"
+    );
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "a"), "y"), -30.0);
+    let zone = element(&out, "z");
+    approx(num(zone, "x"), 0.0);
+    approx(num(zone, "y"), -105.0);
+    approx(num(zone, "width"), 600.0);
+    approx(num(zone, "height"), 405.0);
+    let title = element(&out, "t");
+    approx(num(title, "x"), 16.0);
+    approx(num(title, "y"), -93.0);
+
+    let path = temp_path("b25-db-dy.excalidraw");
+    fs::copy(fixture("swimlanes"), &path).expect("copy swimlanes");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) =
+        run_layout(&["layout", "move", path_str, "--id", "db", "--dy", "10"]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("resized 0 item(s)"), "stderr={stderr}");
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "db"), "x"), 720.0);
+    approx(num(element(&out, "lane_be"), "width"), 400.0);
+}
+
+fn frame_with_three_boxes() -> String {
+    r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "frame", "id": "f", "x": 0, "y": 0, "width": 600, "height": 300, "name": "Lane"},
+    {"type": "rectangle", "id": "a", "x": 40, "y": 110, "width": 140, "height": 80, "frameId": "f"},
+    {"type": "rectangle", "id": "b", "x": 220, "y": 110, "width": 140, "height": 80, "frameId": "f"},
+    {"type": "rectangle", "id": "c", "x": 400, "y": 110, "width": 140, "height": 80, "frameId": "f"}
+  ]
+}"#
+    .to_string()
+}
+
+#[test]
+fn edge_margin_frame_grows_when_child_stays_inside() {
+    let path = temp_path("b25-frame-dx100.excalidraw");
+    fs::write(&path, frame_with_three_boxes()).expect("write frame");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) =
+        run_layout(&["layout", "move", path_str, "--id", "c", "--dx", "100"]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("resized 1 item(s)"), "stderr={stderr}");
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "c"), "x"), 500.0);
+    approx(num(element(&out, "f"), "width"), 680.0);
+    let issues = lint_issues(&stdout);
+    assert!(
+        issues
+            .iter()
+            .all(|issue| issue["rule"] != "CONTAINER_OVERFLOW"),
+        "issues={issues:?}"
+    );
+}
+
+#[test]
+fn ripple_move_cotranslates_downstream_sibling() {
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "z_edge", "x": 60, "y": 60, "width": 940, "height": 160},
+    {"type": "text", "id": "t", "x": 76, "y": 72, "width": 40, "height": 25, "text": "Edge", "fontSize": 20},
+    {"type": "rectangle", "id": "checkout", "x": 100, "y": 100, "width": 200, "height": 80},
+    {"type": "rectangle", "id": "api_gw", "x": 420, "y": 100, "width": 200, "height": 80},
+    {"type": "rectangle", "id": "risk_eng", "x": 740, "y": 100, "width": 200, "height": 80}
+  ]
+}"#;
+    let path = temp_path("b26-layout-ripple.excalidraw");
+    fs::write(&path, src).expect("write ripple scene");
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout", "move", path_str, "--id", "api_gw", "--dx", "54", "--ripple",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("moved 2 item(s), resized 1 item(s)"),
+        "stderr={stderr}"
+    );
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "api_gw"), "x"), 474.0);
+    approx(num(element(&out, "risk_eng"), "x"), 794.0);
+    approx(num(element(&out, "checkout"), "x"), 100.0);
+    approx(
+        num(element(&out, "z_edge"), "x") + num(element(&out, "z_edge"), "width"),
+        1034.0,
+    );
+    let issues = lint_issues(&stdout);
+    assert!(
+        issues
+            .iter()
+            .all(|issue| issue["severity"] != "error" && issue["severity"] != "warn"),
+        "issues={issues:?}"
+    );
+}
+
+#[test]
 fn distribute_push_ripples_same_band_and_leaves_lower_row() {
     let inner = fixture_p_plus_r();
     let close = inner.rfind(']').expect("elements close");
