@@ -987,3 +987,320 @@ fn draw_via_and_route_reject_bad_waypoints_and_non_arrows() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn draw_node_from_edge_label_clamps_explicit_gap_to_label_floor() {
+    let path = temp_path("gap-floor");
+    let path_s = path.to_str().expect("utf8 path");
+    let _ = std::fs::remove_file(&path);
+    seed_nodes(
+        path_s,
+        &[("client", "Client", &["--x", "100", "--y", "100"])],
+    );
+
+    // "POST /v1/charges" is 16 chars * 16 * 0.6 = 153.6; floor = ceil(153.6 + 24) = 178 > 120.
+    let (code, stdout, stderr) = run(&[
+        "draw",
+        "node",
+        path_s,
+        "--id",
+        "api_gw",
+        "--label",
+        "API",
+        "--right-of",
+        "client",
+        "--gap",
+        "120",
+        "--from",
+        "client",
+        "--edge-label",
+        "POST /v1/charges",
+        "--in-place",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr:?} stdout={stdout:?}");
+    let doc = load(&path);
+    assert_eq!(num(element(&doc, "api_gw"), "x"), 438.0);
+    assert!(
+        !lint_rules(path_s)
+            .iter()
+            .any(|rule| rule == "ARROW_LABEL_COLLISION"),
+        "clamped gap must not collide the edge label"
+    );
+
+    let path = temp_path("gap-floor-wide");
+    let path_s = path.to_str().expect("utf8 path");
+    let _ = std::fs::remove_file(&path);
+    seed_nodes(
+        path_s,
+        &[("client", "Client", &["--x", "100", "--y", "100"])],
+    );
+    let (code, stdout, stderr) = run(&[
+        "draw",
+        "node",
+        path_s,
+        "--id",
+        "api_gw",
+        "--label",
+        "API",
+        "--right-of",
+        "client",
+        "--gap",
+        "300",
+        "--from",
+        "client",
+        "--edge-label",
+        "POST /v1/charges",
+        "--in-place",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr:?} stdout={stdout:?}");
+    assert_eq!(num(element(&load(&path), "api_gw"), "x"), 560.0);
+
+    let path = temp_path("gap-no-edge");
+    let path_s = path.to_str().expect("utf8 path");
+    let _ = std::fs::remove_file(&path);
+    seed_nodes(
+        path_s,
+        &[("client", "Client", &["--x", "100", "--y", "100"])],
+    );
+    let (code, stdout, stderr) = run(&[
+        "draw",
+        "node",
+        path_s,
+        "--id",
+        "api_gw",
+        "--label",
+        "API",
+        "--right-of",
+        "client",
+        "--gap",
+        "120",
+        "--in-place",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr:?} stdout={stdout:?}");
+    assert_eq!(num(element(&load(&path), "api_gw"), "x"), 380.0);
+
+    // "ok" height is 16 * 1.25 = 20; floor = ceil(20 + 24) = 44 > 30.
+    let path = temp_path("gap-floor-below");
+    let path_s = path.to_str().expect("utf8 path");
+    let _ = std::fs::remove_file(&path);
+    seed_nodes(
+        path_s,
+        &[("client", "Client", &["--x", "100", "--y", "100"])],
+    );
+    let (code, stdout, stderr) = run(&[
+        "draw",
+        "node",
+        path_s,
+        "--id",
+        "api_gw",
+        "--label",
+        "API",
+        "--below",
+        "client",
+        "--gap",
+        "30",
+        "--from",
+        "client",
+        "--edge-label",
+        "ok",
+        "--in-place",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr:?} stdout={stdout:?}");
+    assert_eq!(num(element(&load(&path), "api_gw"), "y"), 224.0);
+}
+
+#[test]
+fn draw_connect_elbow_uses_vertical_ports_when_boxes_overlap_horizontally() {
+    let path = temp_path("axis-overlap");
+    let path_s = path.to_str().expect("utf8 path");
+    let _ = std::fs::remove_file(&path);
+    seed_nodes(
+        path_s,
+        &[
+            (
+                "a",
+                "A",
+                &[
+                    "--x", "100", "--y", "100", "--width", "400", "--height", "80",
+                ],
+            ),
+            (
+                "b",
+                "B",
+                &["--x", "0", "--y", "220", "--width", "300", "--height", "80"],
+            ),
+        ],
+    );
+
+    let (code, stdout, stderr) = run(&[
+        "draw",
+        "connect",
+        path_s,
+        "--from",
+        "a",
+        "--to",
+        "b",
+        "--id",
+        "ab",
+        "--elbow",
+        "--in-place",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr:?} stdout={stdout:?}");
+    let doc = load(&path);
+    let arrow = element(&doc, "ab");
+    assert_eq!(
+        arrow["startBinding"]["fixedPoint"],
+        serde_json::json!([0.5, 1])
+    );
+    assert_eq!(
+        arrow["endBinding"]["fixedPoint"],
+        serde_json::json!([0.5, 0])
+    );
+    assert_eq!(num(arrow, "x"), 300.0);
+    assert_eq!(num(arrow, "y"), 186.0);
+    assert_eq!(
+        arrow["points"],
+        serde_json::json!([[0, 0], [0, 14], [-150, 14], [-150, 28]])
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn draw_connect_elbow_spreads_fan_out_and_fan_in_ports() {
+    let path = temp_path("fan");
+    let path_s = path.to_str().expect("utf8 path");
+    let _ = std::fs::remove_file(&path);
+    seed_nodes(
+        path_s,
+        &[
+            (
+                "blender",
+                "Blender",
+                &[
+                    "--x", "100", "--y", "300", "--width", "160", "--height", "80",
+                ],
+            ),
+            (
+                "shard_1",
+                "Shard 1",
+                &[
+                    "--x", "400", "--y", "180", "--width", "160", "--height", "80",
+                ],
+            ),
+            (
+                "shard_2",
+                "Shard 2",
+                &[
+                    "--x", "400", "--y", "300", "--width", "160", "--height", "80",
+                ],
+            ),
+            (
+                "shard_3",
+                "Shard 3",
+                &[
+                    "--x", "400", "--y", "420", "--width", "160", "--height", "80",
+                ],
+            ),
+            (
+                "ranker",
+                "Ranker",
+                &[
+                    "--x", "700", "--y", "300", "--width", "160", "--height", "80",
+                ],
+            ),
+        ],
+    );
+
+    let pairs = [
+        ("blender", "shard_1", 0),
+        ("blender", "shard_2", 1),
+        ("blender", "shard_3", 2),
+        ("shard_1", "ranker", 0),
+        ("shard_2", "ranker", 1),
+        ("shard_3", "ranker", 2),
+    ];
+    for (from, to, updated) in pairs {
+        let (code, stdout, stderr) = run(&[
+            "draw",
+            "connect",
+            path_s,
+            "--from",
+            from,
+            "--to",
+            to,
+            "--elbow",
+            "--in-place",
+        ]);
+        assert_eq!(code, 0, "{from}->{to} stderr={stderr:?} stdout={stdout:?}");
+        assert_report(&stderr, 1, updated, 0);
+    }
+
+    let doc = load(&path);
+    let blender_shard_1 = element(&doc, "blender-shard_1");
+    assert_eq!(
+        blender_shard_1["startBinding"]["fixedPoint"],
+        serde_json::json!([1, 0.35])
+    );
+    assert_eq!(
+        absolute_points(blender_shard_1),
+        vec![
+            (266.0, 328.0),
+            (330.0, 328.0),
+            (330.0, 220.0),
+            (394.0, 220.0)
+        ]
+    );
+    let blender_shard_2 = element(&doc, "blender-shard_2");
+    assert_eq!(
+        blender_shard_2["startBinding"]["fixedPoint"],
+        serde_json::json!([1, 0.5])
+    );
+    assert_eq!(
+        absolute_points(blender_shard_2),
+        vec![(266.0, 340.0), (394.0, 340.0)]
+    );
+    let blender_shard_3 = element(&doc, "blender-shard_3");
+    assert_eq!(
+        blender_shard_3["startBinding"]["fixedPoint"],
+        serde_json::json!([1, 0.65])
+    );
+    assert_eq!(
+        absolute_points(blender_shard_3),
+        vec![
+            (266.0, 352.0),
+            (330.0, 352.0),
+            (330.0, 460.0),
+            (394.0, 460.0)
+        ]
+    );
+
+    for (id, y) in [
+        ("shard_1-ranker", 328.0),
+        ("shard_2-ranker", 340.0),
+        ("shard_3-ranker", 352.0),
+    ] {
+        let arrow = element(&doc, id);
+        let u = if (y - 340.0_f64).abs() < 0.5 {
+            0.5
+        } else if y < 340.0 {
+            0.35
+        } else {
+            0.65
+        };
+        assert_eq!(
+            arrow["endBinding"]["fixedPoint"],
+            serde_json::json!([0, u]),
+            "{id} end fixedPoint"
+        );
+        let abs = absolute_points(arrow);
+        assert_eq!(
+            abs.last().copied(),
+            Some((694.0, y)),
+            "{id} end point {abs:?}"
+        );
+    }
+    assert_clean_lint(path_s);
+
+    let _ = std::fs::remove_file(&path);
+}

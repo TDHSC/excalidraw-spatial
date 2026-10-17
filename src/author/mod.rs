@@ -710,15 +710,13 @@ fn place_xy(scene: &Scene, w: f64, h: f64, place: &Placement<'_>) -> anyhow::Res
 }
 
 fn default_gap(gap: Option<f64>, edge_label: Option<&str>, horizontal_relation: bool) -> f64 {
-    if let Some(gap) = gap {
-        return gap;
-    }
-    if let Some(edge_label) = edge_label {
-        let (el_w, el_h) = text_metrics::estimate(edge_label, 16.0, 1.25);
-        let dim = if horizontal_relation { el_w } else { el_h };
-        return 60.0_f64.max(ceil_px(dim + 24.0));
-    }
-    60.0
+    let Some(edge_label) = edge_label else {
+        return gap.unwrap_or(60.0);
+    };
+    let (el_w, el_h) = text_metrics::estimate(edge_label, 16.0, 1.25);
+    let dim = if horizontal_relation { el_w } else { el_h };
+    let floor = ceil_px(dim + 24.0);
+    gap.unwrap_or(60.0).max(floor)
 }
 
 struct NodeDraw<'a> {
@@ -894,8 +892,7 @@ fn draw_connect(doc: &mut Document, cmd: ConnectDraw<'_>) -> anyhow::Result<Auth
         } else {
             Vec::new()
         };
-        let horizontal = (end.rect.center().x - start.rect.center().x).abs()
-            >= (end.rect.center().y - start.rect.center().y).abs();
+        let horizontal = connect_horizontal(&start.rect, &end.rect);
         let slot = if existing.is_empty() {
             None
         } else {
@@ -907,7 +904,7 @@ fn draw_connect(doc: &mut Document, cmd: ConnectDraw<'_>) -> anyhow::Result<Auth
             }
             None => (quantize_fp(start_fp), quantize_fp(end_fp)),
         };
-        let abs = route_points(&start, &end, start_fp, end_fp, cmd.elbow, horizontal);
+        let abs = route_points(&start, &end, start_fp, end_fp, cmd.elbow);
         let updated = if existing.is_empty() {
             0
         } else {
@@ -964,10 +961,232 @@ fn draw_connect(doc: &mut Document, cmd: ConnectDraw<'_>) -> anyhow::Result<Auth
     }
     doc.push_bound_element(&start.elem_id, "arrow", &arrow_id);
     doc.push_bound_element(&end.elem_id, "arrow", &arrow_id);
+    let mut updated = updated;
+    if cmd.elbow && cmd.via.is_none() {
+        doc.refresh();
+        let mut modified_existing = HashSet::new();
+        if cmd.from_side.is_none() {
+            spread_elbow_ports(doc, &start, start_fp, &arrow_id, &mut modified_existing);
+        }
+        doc.refresh();
+        if cmd.to_side.is_none() {
+            spread_elbow_ports(doc, &end, end_fp, &arrow_id, &mut modified_existing);
+        }
+        updated += modified_existing.len();
+    }
     Ok(AuthorReport {
         added: 1,
         updated,
         removed: 0,
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PortSide {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+fn binding_side(fp: [f64; 2]) -> Option<PortSide> {
+    if (fp[0] - 0.0).abs() < 1e-6 {
+        Some(PortSide::Left)
+    } else if (fp[0] - 1.0).abs() < 1e-6 {
+        Some(PortSide::Right)
+    } else if (fp[1] - 0.0).abs() < 1e-6 {
+        Some(PortSide::Top)
+    } else if (fp[1] - 1.0).abs() < 1e-6 {
+        Some(PortSide::Bottom)
+    } else {
+        None
+    }
+}
+
+fn spread_elbow_ports(
+    doc: &mut Document,
+    elem: &Endpoint,
+    new_fp: [f64; 2],
+    new_arrow_id: &str,
+    modified_existing: &mut HashSet<String>,
+) {
+    let Some(side) = binding_side(new_fp) else {
+        return;
+    };
+    let mut arrows_on_side = Vec::new();
+    for el in &doc.elements {
+        if el.element_type != "arrow" || el.is_deleted() || el.elbowed != Some(true) {
+            continue;
+        }
+        let start_hit = el
+            .start_binding
+            .as_ref()
+            .and_then(|b| b.element_id.as_deref())
+            == Some(elem.elem_id.as_str())
+            && el
+                .start_binding
+                .as_ref()
+                .and_then(|b| b.fixed_point)
+                .and_then(binding_side)
+                == Some(side);
+        let end_hit = el
+            .end_binding
+            .as_ref()
+            .and_then(|b| b.element_id.as_deref())
+            == Some(elem.elem_id.as_str())
+            && el
+                .end_binding
+                .as_ref()
+                .and_then(|b| b.fixed_point)
+                .and_then(binding_side)
+                == Some(side);
+        if start_hit || end_hit {
+            let abs = el.abs_points();
+            let other = if start_hit {
+                abs.last().copied()
+            } else {
+                abs.first().copied()
+            };
+            let Some(other) = other else {
+                continue;
+            };
+            arrows_on_side.push((el.id.clone(), start_hit, other));
+        }
+    }
+    if arrows_on_side.len() < 2 {
+        return;
+    }
+    let total = arrows_on_side.len();
+    arrows_on_side.sort_by(|a, b| {
+        let ka = if matches!(side, PortSide::Left | PortSide::Right) {
+            a.2.y
+        } else {
+            a.2.x
+        };
+        let kb = if matches!(side, PortSide::Left | PortSide::Right) {
+            b.2.y
+        } else {
+            b.2.x
+        };
+        ka.total_cmp(&kb).then_with(|| a.0.cmp(&b.0))
+    });
+    let (side_x, side_y) = match side {
+        PortSide::Left => (0.0, 0.0),
+        PortSide::Right => (1.0, 0.0),
+        PortSide::Top => (0.0, 0.0),
+        PortSide::Bottom => (0.0, 1.0),
+    };
+    for (k, (arr_id, at_start, _)) in arrows_on_side.iter().enumerate() {
+        let u_k = round_json(0.2 + 0.6 * ((k + 1) as f64 / (total + 1) as f64));
+        let fp_k = if matches!(side, PortSide::Left | PortSide::Right) {
+            [side_x, u_k]
+        } else {
+            [u_k, side_y]
+        };
+        let old_fp = doc
+            .element(arr_id)
+            .and_then(|el| {
+                if *at_start {
+                    el.start_binding.as_ref()
+                } else {
+                    el.end_binding.as_ref()
+                }
+            })
+            .and_then(|b| b.fixed_point);
+        let changed = old_fp
+            .is_none_or(|old| (old[0] - fp_k[0]).abs() > 1e-6 || (old[1] - fp_k[1]).abs() > 1e-6);
+        if !changed {
+            continue;
+        }
+        let key = if *at_start {
+            "startBinding"
+        } else {
+            "endBinding"
+        };
+        set_fixed_point(doc, arr_id, key, fp_k);
+        let new_pt = point_on_side(&elem.rect, elem.gap, fp_k);
+        let Some(mut abs) = doc.element(arr_id).map(|el| el.abs_points()) else {
+            continue;
+        };
+        if abs.len() == 2 {
+            if *at_start {
+                abs[0] = new_pt;
+            } else {
+                abs[1] = new_pt;
+            }
+            if (abs[1].x - abs[0].x).abs() > 0.5 && (abs[1].y - abs[0].y).abs() > 0.5 {
+                let (s_rect, e_rect) = arrow_end_rects(doc, arr_id)
+                    .map(|(s, e, _)| (s, e))
+                    .unwrap_or((elem.rect, elem.rect));
+                let is_horiz_start = (fp_k[0] - 0.0).abs() < 1e-6 || (fp_k[0] - 1.0).abs() < 1e-6;
+                abs = elbow_two_point_route(abs[0], abs[1], is_horiz_start, &s_rect, &e_rect);
+            }
+        } else if abs.len() >= 3 {
+            if *at_start {
+                abs[0] = new_pt;
+                if matches!(side, PortSide::Left | PortSide::Right) {
+                    abs[1].y = new_pt.y;
+                } else {
+                    abs[1].x = new_pt.x;
+                }
+            } else {
+                let n = abs.len();
+                abs[n - 1] = new_pt;
+                if matches!(side, PortSide::Left | PortSide::Right) {
+                    abs[n - 2].y = new_pt.y;
+                } else {
+                    abs[n - 2].x = new_pt.x;
+                }
+            }
+            abs = simplify_elbow_points(&abs);
+        }
+        write_arrow_points(doc, arr_id, &abs);
+        doc.refresh();
+        if let Some(label_id) = bound_label_id(doc, arr_id) {
+            let fraction = doc
+                .element(arr_id)
+                .and_then(|el| el.label_position)
+                .unwrap_or(0.5);
+            let mut moved = std::collections::HashMap::new();
+            place_label(doc, &label_id, &abs, fraction, &mut moved);
+            doc.refresh();
+        }
+        if arr_id != new_arrow_id {
+            modified_existing.insert(arr_id.clone());
+        }
+    }
+}
+
+fn simplify_elbow_points(abs: &[Point]) -> Vec<Point> {
+    let mut kept: Vec<Point> = Vec::new();
+    for p in abs {
+        if let Some(prev) = kept.last() {
+            if (p.x - prev.x).abs() < 0.5 && (p.y - prev.y).abs() < 0.5 {
+                continue;
+            }
+        }
+        kept.push(*p);
+    }
+    let mut i = 1;
+    while i + 1 < kept.len() {
+        let a = kept[i - 1];
+        let b = kept[i];
+        let c = kept[i + 1];
+        let same_x = (a.x - b.x).abs() < 0.5 && (b.x - c.x).abs() < 0.5;
+        let same_y = (a.y - b.y).abs() < 0.5 && (b.y - c.y).abs() < 0.5;
+        if same_x || same_y {
+            kept.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+    kept
+}
+
+fn bound_label_id(doc: &Document, arrow_id: &str) -> Option<String> {
+    doc.elements.iter().find_map(|el| {
+        (el.element_type == "text" && el.container_id.as_deref() == Some(arrow_id))
+            .then(|| el.id.clone())
     })
 }
 
@@ -1079,8 +1298,14 @@ fn vertical_pair(start: &Rect, end: &Rect) -> ([f64; 2], [f64; 2]) {
     }
 }
 
-fn axis_overlap(a: &Rect, b: &Rect) -> bool {
-    a.x1 < b.x2 && b.x1 < a.x2 && a.y1 < b.y2 && b.y1 < a.y2
+fn connect_horizontal(s: &Rect, e: &Rect) -> bool {
+    let x_ov = s.x1 < e.x2 && e.x1 < s.x2;
+    let y_ov = s.y1 < e.y2 && e.y1 < s.y2;
+    match (x_ov, y_ov) {
+        (true, false) => false,
+        (false, true) => true,
+        _ => (e.center().x - s.center().x).abs() >= (e.center().y - s.center().y).abs(),
+    }
 }
 
 fn choose_fixed_points(
@@ -1089,9 +1314,9 @@ fn choose_fixed_points(
     end: &Endpoint,
     cmd: &ConnectDraw<'_>,
 ) -> ([f64; 2], [f64; 2]) {
-    let sc = start.rect.center();
-    let ec = end.rect.center();
-    let horizontal = (ec.x - sc.x).abs() >= (ec.y - sc.y).abs();
+    let x_ov = start.rect.x1 < end.rect.x2 && end.rect.x1 < start.rect.x2;
+    let y_ov = start.rect.y1 < end.rect.y2 && end.rect.y1 < start.rect.y2;
+    let horizontal = connect_horizontal(&start.rect, &end.rect);
     let h_pair = horizontal_pair(&start.rect, &end.rect);
     let v_pair = vertical_pair(&start.rect, &end.rect);
     let (start_fp, end_fp) = if cmd.from_side.is_some() || cmd.to_side.is_some() {
@@ -1104,7 +1329,7 @@ fn choose_fixed_points(
                 .map(side_fp)
                 .unwrap_or(if horizontal { h_pair.1 } else { v_pair.1 });
         (start_fp, end_fp)
-    } else if cmd.elbow && !axis_overlap(&start.rect, &end.rect) {
+    } else if cmd.elbow && !x_ov && !y_ov {
         let h_hits = route_node_hits(scene, start, end, h_pair.0, h_pair.1, true);
         let v_hits = route_node_hits(scene, start, end, v_pair.0, v_pair.1, false);
         if h_hits < v_hits || (h_hits == v_hits && horizontal) {
@@ -1128,8 +1353,8 @@ fn route_node_hits(
     end_fp: [f64; 2],
     horizontal: bool,
 ) -> usize {
-    let s_pt = point_on_inflated(&start.rect, start.gap, start_fp);
-    let e_pt = point_on_inflated(&end.rect, end.gap, end_fp);
+    let s_pt = point_on_side(&start.rect, start.gap, start_fp);
+    let e_pt = point_on_side(&end.rect, end.gap, end_fp);
     let route = if (e_pt.x - s_pt.x).abs() > 0.5 && (e_pt.y - s_pt.y).abs() > 0.5 {
         elbow_two_point_route(s_pt, e_pt, horizontal, &start.rect, &end.rect)
     } else {
@@ -1321,12 +1546,18 @@ fn quantize_fp(fp: [f64; 2]) -> [f64; 2] {
     [round_json(fp[0]), round_json(fp[1])]
 }
 
-fn point_on_inflated(rect: &Rect, gap: f64, fp: [f64; 2]) -> Point {
-    let inflated = rect.inflate(gap);
-    Point {
-        x: inflated.x1 + fp[0] * inflated.width(),
-        y: inflated.y1 + fp[1] * inflated.height(),
+fn point_on_side(rect: &Rect, gap: f64, fp: [f64; 2]) -> Point {
+    let mut p = focus_point(rect, Some(fp));
+    if (fp[0] - 0.0).abs() < 1e-6 {
+        p.x -= gap;
+    } else if (fp[0] - 1.0).abs() < 1e-6 {
+        p.x += gap;
+    } else if (fp[1] - 0.0).abs() < 1e-6 {
+        p.y -= gap;
+    } else if (fp[1] - 1.0).abs() < 1e-6 {
+        p.y += gap;
     }
+    p
 }
 
 fn route_points(
@@ -1335,12 +1566,11 @@ fn route_points(
     start_fp: [f64; 2],
     end_fp: [f64; 2],
     elbow: bool,
-    _center_horizontal: bool,
 ) -> Vec<Point> {
     if elbow {
-        let s_pt = point_on_inflated(&start.rect, start.gap, start_fp);
-        let e_pt = point_on_inflated(&end.rect, end.gap, end_fp);
-        let horizontal = (start_fp[1] - 0.5).abs() < 1e-6;
+        let s_pt = point_on_side(&start.rect, start.gap, start_fp);
+        let e_pt = point_on_side(&end.rect, end.gap, end_fp);
+        let horizontal = (start_fp[0] - 0.0).abs() < 1e-6 || (start_fp[0] - 1.0).abs() < 1e-6;
         if (e_pt.x - s_pt.x).abs() > 0.5 && (e_pt.y - s_pt.y).abs() > 0.5 {
             elbow_two_point_route(s_pt, e_pt, horizontal, &start.rect, &end.rect)
         } else {
