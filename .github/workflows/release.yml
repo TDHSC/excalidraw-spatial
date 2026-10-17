@@ -94,8 +94,10 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Copy install.sh into artifacts
-        run: cp install.sh artifacts/install.sh
+      - name: Copy installer scripts into artifacts
+        run: |
+          cp install.sh artifacts/install.sh
+          cp install.ps1 artifacts/install.ps1
 
       - name: Publish release assets
         env:

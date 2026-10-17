@@ -47,9 +47,11 @@ Every diagram below was generated entirely from CLI commands (`node`, `zone`, `c
 
 ## Quick Start
 
-Install the prebuilt `excal` binary with `curl` (macOS & Linux) or build from source with Cargo.
+Install the prebuilt `excal` binary for macOS, Linux, or Windows, or build from source with Cargo.
 
 1. **Install `excal`:**
+
+    **macOS / Linux / Git Bash on Windows (`curl`):**
 
     ```sh
     curl -fsSL https://raw.githubusercontent.com/TDHSC/excalidraw-spatial/main/install.sh | sh
@@ -61,7 +63,13 @@ Install the prebuilt `excal` binary with `curl` (macOS & Linux) or build from so
     curl -fsSL https://raw.githubusercontent.com/TDHSC/excalidraw-spatial/main/install.sh | sh -s -- --dir /usr/local/bin --version v0.1.0
     ```
 
-    Or build from source with Cargo:
+    **Windows PowerShell (`irm`):**
+
+    ```powershell
+    irm https://raw.githubusercontent.com/TDHSC/excalidraw-spatial/main/install.ps1 | iex
+    ```
+
+    **From source with Cargo (any platform):**
 
     ```sh
     cargo install --git https://github.com/TDHSC/excalidraw-spatial.git
@@ -146,7 +154,8 @@ The crate compiles both a library (`excalidraw_spatial` in `src/lib.rs`) and the
 .
 ├── Cargo.toml                  # Crate manifest and dependency list
 ├── README.md                   # Project overview and quick start
-├── install.sh                  # Cross-platform curl installer script
+├── install.sh                  # macOS / Linux / Git Bash curl installer script
+├── install.ps1                 # Windows PowerShell installer script
 ├── docs/
 │   ├── assets/                 # Visual example screenshots for README
 │   ├── architecture.md         # Scene-graph, spatial, and lossless JSON patching reference

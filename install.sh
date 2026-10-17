@@ -45,19 +45,6 @@ done
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
-case "$OS" in
-    Darwin)
-        OS_TRIPLE="apple-darwin"
-        ;;
-    Linux)
-        OS_TRIPLE="unknown-linux-gnu"
-        ;;
-    *)
-        echo "excal-install: unsupported operating system: $OS" >&2
-        exit 1
-        ;;
-esac
-
 case "$ARCH" in
     arm64 | aarch64)
         ARCH_TRIPLE="aarch64"
@@ -71,8 +58,26 @@ case "$ARCH" in
         ;;
 esac
 
-TARGET="${ARCH_TRIPLE}-${OS_TRIPLE}"
-ARCHIVE="${BIN_NAME}-${TARGET}.tar.gz"
+EXT="tar.gz"
+case "$OS" in
+    Darwin)
+        TARGET="${ARCH_TRIPLE}-apple-darwin"
+        ;;
+    Linux)
+        TARGET="${ARCH_TRIPLE}-unknown-linux-gnu"
+        ;;
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+        TARGET="x86_64-pc-windows-msvc"
+        BIN_NAME="excal.exe"
+        EXT="zip"
+        ;;
+    *)
+        echo "excal-install: unsupported operating system: $OS" >&2
+        exit 1
+        ;;
+esac
+
+ARCHIVE="excal-${TARGET}.${EXT}"
 
 if [ "$VERSION" = "latest" ]; then
     URL="https://github.com/${REPO}/releases/latest/download/${ARCHIVE}"
@@ -97,7 +102,12 @@ else
     exit 1
 fi
 
-tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "$TMP_DIR"
+if [ "$EXT" = "zip" ]; then
+    unzip -q "${TMP_DIR}/${ARCHIVE}" -d "$TMP_DIR"
+else
+    tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "$TMP_DIR"
+fi
+
 mkdir -p "$INSTALL_DIR"
 install -m 755 "${TMP_DIR}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
 
