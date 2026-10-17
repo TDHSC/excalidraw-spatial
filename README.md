@@ -47,19 +47,30 @@ Every diagram below was generated entirely from CLI commands (`node`, `zone`, `c
 
 ## Quick Start
 
-Build the `excal` binary with Cargo and inspect, lint, or author a diagram from the repository root.
+Install the prebuilt `excal` binary with `curl` (macOS & Linux) or build from source with Cargo.
 
-1. **Build and test the project:**
+1. **Install `excal`:**
 
     ```sh
-    cargo build --release
-    cargo test
+    curl -fsSL https://raw.githubusercontent.com/TDHSC/excalidraw-spatial/main/install.sh | sh
+    ```
+
+    To install to a custom directory or pin a release version:
+
+    ```sh
+    curl -fsSL https://raw.githubusercontent.com/TDHSC/excalidraw-spatial/main/install.sh | sh -s -- --dir /usr/local/bin --version v0.1.0
+    ```
+
+    Or build from source with Cargo:
+
+    ```sh
+    cargo install --git https://github.com/TDHSC/excalidraw-spatial.git
     ```
 
 2. **Inspect an existing `.excalidraw` diagram:**
 
     ```sh
-    cargo run --quiet -- inspect tests/fixtures/basic_flow.excalidraw
+    excal inspect tests/fixtures/basic_flow.excalidraw
     ```
 
     Observable output on `stdout`:
@@ -100,7 +111,7 @@ Build the `excal` binary with Cargo and inspect, lint, or author a diagram from 
 3. **Run geometric lint checks and apply the suggested layout command:**
 
     ```sh
-    cargo run --quiet -- lint tests/fixtures/overlap.excalidraw
+    excal lint tests/fixtures/overlap.excalidraw
     ```
 
     `excal lint` exits with code `1` when errors are present and prints a copy-pasteable `run:` fix command:
@@ -135,6 +146,7 @@ The crate compiles both a library (`excalidraw_spatial` in `src/lib.rs`) and the
 .
 ├── Cargo.toml                  # Crate manifest and dependency list
 ├── README.md                   # Project overview and quick start
+├── install.sh                  # Cross-platform curl installer script
 ├── docs/
 │   ├── assets/                 # Visual example screenshots for README
 │   ├── architecture.md         # Scene-graph, spatial, and lossless JSON patching reference
