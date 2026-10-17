@@ -1,6 +1,8 @@
 <!-- markdownlint-disable MD033 -->
 
-# excalidraw-spatial (`excal`)
+# excalidraw-spatial
+
+<img width="3168" height="1344" alt="Gemini_Generated_Image_2iz3292iz3292iz3" src="https://github.com/user-attachments/assets/737b7fa2-ee23-43ac-8c68-afa46681384d" />
 
 ## Summary
 
