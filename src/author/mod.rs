@@ -604,7 +604,8 @@ pub fn apply_draw(
             let _ = normalize_text(text);
             anyhow::bail!("not implemented")
         }
-        DrawCommands::Route { .. } | DrawCommands::Remove { .. } | DrawCommands::Batch { .. } => {
+        DrawCommands::Route { id, via, .. } => draw_route(doc, id, via),
+        DrawCommands::Remove { .. } | DrawCommands::Batch { .. } => {
             anyhow::bail!("not implemented")
         }
     }
@@ -862,9 +863,6 @@ struct Endpoint {
 }
 
 fn draw_connect(doc: &mut Document, cmd: ConnectDraw<'_>) -> anyhow::Result<AuthorReport> {
-    if cmd.via.is_some() {
-        anyhow::bail!("not implemented");
-    }
     let scene = Scene::build(doc);
     let start = resolve_endpoint(&scene, doc, cmd.from)?;
     let end = resolve_endpoint(&scene, doc, cmd.to)?;
@@ -879,29 +877,38 @@ fn draw_connect(doc: &mut Document, cmd: ConnectDraw<'_>) -> anyhow::Result<Auth
         None => derived_connector_id(doc, &start.target, &end.target),
     };
 
-    let (start_fp, end_fp) = choose_fixed_points(&scene, &start, &end, &cmd);
-    let existing =
-        if !cmd.elbow && cmd.via.is_none() && cmd.from_side.is_none() && cmd.to_side.is_none() {
+    let via = cmd.via.map(parse_via).transpose()?;
+    let (start_fp, end_fp, abs, elbowed, updated) = if let Some(via) = via {
+        let (start_fp, end_fp, abs) =
+            compute_via_route(&start.rect, start.gap, &end.rect, end.gap, via)?;
+        (start_fp, end_fp, abs, true, 0)
+    } else {
+        let (start_fp, end_fp) = choose_fixed_points(&scene, &start, &end, &cmd);
+        let existing = if !cmd.elbow && cmd.from_side.is_none() && cmd.to_side.is_none() {
             parallel_arrows(&scene, &start.target, &end.target)
         } else {
             Vec::new()
         };
-    let horizontal = (end.rect.center().x - start.rect.center().x).abs()
-        >= (end.rect.center().y - start.rect.center().y).abs();
-    let slot = if existing.is_empty() {
-        None
-    } else {
-        Some(existing.len())
-    };
-    let (start_fp, end_fp) = match slot {
-        Some(k) => spread_fixed_points(&start.rect, &end.rect, horizontal, existing.len() + 1, k),
-        None => (quantize_fp(start_fp), quantize_fp(end_fp)),
-    };
-    let abs = route_points(&start, &end, start_fp, end_fp, cmd.elbow, horizontal);
-    let updated = if existing.is_empty() {
-        0
-    } else {
-        spread_existing(doc, &existing, horizontal)
+        let horizontal = (end.rect.center().x - start.rect.center().x).abs()
+            >= (end.rect.center().y - start.rect.center().y).abs();
+        let slot = if existing.is_empty() {
+            None
+        } else {
+            Some(existing.len())
+        };
+        let (start_fp, end_fp) = match slot {
+            Some(k) => {
+                spread_fixed_points(&start.rect, &end.rect, horizontal, existing.len() + 1, k)
+            }
+            None => (quantize_fp(start_fp), quantize_fp(end_fp)),
+        };
+        let abs = route_points(&start, &end, start_fp, end_fp, cmd.elbow, horizontal);
+        let updated = if existing.is_empty() {
+            0
+        } else {
+            spread_existing(doc, &existing, horizontal)
+        };
+        (start_fp, end_fp, abs, cmd.elbow, updated)
     };
 
     let frame_id = shared_frame(&start.frame_id, &end.frame_id);
@@ -916,7 +923,7 @@ fn draw_connect(doc: &mut Document, cmd: ConnectDraw<'_>) -> anyhow::Result<Auth
         &ArrowEnds {
             start: Some(binding_value(&start.elem_id, start_fp)),
             end: Some(binding_value(&end.elem_id, end_fp)),
-            elbowed: cmd.elbow,
+            elbowed,
             bound_label: label_id.clone(),
             frame_id: frame_id.clone(),
         },
@@ -1347,6 +1354,226 @@ fn binding_value(elem_id: &str, fp: [f64; 2]) -> serde_json::Value {
         "elementId": elem_id,
         "fixedPoint": [json_num(fp[0]), json_num(fp[1])],
         "mode": "orbit",
+    })
+}
+
+#[derive(Clone, Copy)]
+enum Via {
+    X(f64),
+    Y(f64),
+}
+
+fn parse_via(raw: &str) -> anyhow::Result<Via> {
+    let invalid = || anyhow::anyhow!("invalid --via \"{raw}\": expected x=<N> or y=<N>");
+    let (axis, value) = raw.split_once('=').ok_or_else(invalid)?;
+    let n: f64 = value.parse().map_err(|_| invalid())?;
+    if !n.is_finite() {
+        return Err(invalid());
+    }
+    match axis {
+        "x" => Ok(Via::X(n)),
+        "y" => Ok(Via::Y(n)),
+        _ => Err(invalid()),
+    }
+}
+
+fn via_hits_span(value: f64, lo: f64, hi: f64) -> bool {
+    value >= lo && value <= hi
+}
+
+fn compute_via_route(
+    s_rect: &Rect,
+    gs: f64,
+    e_rect: &Rect,
+    ge: f64,
+    via: Via,
+) -> anyhow::Result<([f64; 2], [f64; 2], Vec<Point>)> {
+    match via {
+        Via::Y(y_via) => {
+            if via_hits_span(y_via, s_rect.y1 - gs, s_rect.y2 + gs)
+                || via_hits_span(y_via, e_rect.y1 - ge, e_rect.y2 + ge)
+            {
+                anyhow::bail!("--via y={y_via} passes through endpoint bounds");
+            }
+            let (start_fp, s_pt) = if y_via < s_rect.center().y {
+                (
+                    [0.5, 0.0],
+                    Point {
+                        x: s_rect.center().x,
+                        y: s_rect.y1 - gs,
+                    },
+                )
+            } else {
+                (
+                    [0.5, 1.0],
+                    Point {
+                        x: s_rect.center().x,
+                        y: s_rect.y2 + gs,
+                    },
+                )
+            };
+            let (end_fp, e_pt) = if y_via < e_rect.center().y {
+                (
+                    [0.5, 0.0],
+                    Point {
+                        x: e_rect.center().x,
+                        y: e_rect.y1 - ge,
+                    },
+                )
+            } else {
+                (
+                    [0.5, 1.0],
+                    Point {
+                        x: e_rect.center().x,
+                        y: e_rect.y2 + ge,
+                    },
+                )
+            };
+            Ok((
+                start_fp,
+                end_fp,
+                vec![
+                    s_pt,
+                    Point {
+                        x: s_pt.x,
+                        y: y_via,
+                    },
+                    Point {
+                        x: e_pt.x,
+                        y: y_via,
+                    },
+                    e_pt,
+                ],
+            ))
+        }
+        Via::X(x_via) => {
+            if via_hits_span(x_via, s_rect.x1 - gs, s_rect.x2 + gs)
+                || via_hits_span(x_via, e_rect.x1 - ge, e_rect.x2 + ge)
+            {
+                anyhow::bail!("--via x={x_via} passes through endpoint bounds");
+            }
+            let (start_fp, s_pt) = if x_via < s_rect.center().x {
+                (
+                    [0.0, 0.5],
+                    Point {
+                        x: s_rect.x1 - gs,
+                        y: s_rect.center().y,
+                    },
+                )
+            } else {
+                (
+                    [1.0, 0.5],
+                    Point {
+                        x: s_rect.x2 + gs,
+                        y: s_rect.center().y,
+                    },
+                )
+            };
+            let (end_fp, e_pt) = if x_via < e_rect.center().x {
+                (
+                    [0.0, 0.5],
+                    Point {
+                        x: e_rect.x1 - ge,
+                        y: e_rect.center().y,
+                    },
+                )
+            } else {
+                (
+                    [1.0, 0.5],
+                    Point {
+                        x: e_rect.x2 + ge,
+                        y: e_rect.center().y,
+                    },
+                )
+            };
+            Ok((
+                start_fp,
+                end_fp,
+                vec![
+                    s_pt,
+                    Point {
+                        x: x_via,
+                        y: s_pt.y,
+                    },
+                    Point {
+                        x: x_via,
+                        y: e_pt.y,
+                    },
+                    e_pt,
+                ],
+            ))
+        }
+    }
+}
+
+struct RouteEnd {
+    rect: Rect,
+    gap: f64,
+    bound: bool,
+}
+
+fn route_end(scene: &Scene, doc: &Document, attach: &Attach) -> Option<RouteEnd> {
+    match attach {
+        Attach::Bound { element, .. } => {
+            let el = doc.element(element)?;
+            Some(RouteEnd {
+                rect: el.rect(),
+                gap: BINDING_GAP_BASE as f64 + el.stroke_width() / 2.0,
+                bound: true,
+            })
+        }
+        Attach::Near { target, .. } => Some(RouteEnd {
+            rect: scene.rect_of(target)?,
+            gap: 6.0,
+            bound: false,
+        }),
+        Attach::Free => None,
+    }
+}
+
+fn draw_route(doc: &mut Document, id: &str, via: &str) -> anyhow::Result<AuthorReport> {
+    let scene = Scene::build(doc);
+    let Target::Connector(conn_id) = scene.resolve(id)? else {
+        anyhow::bail!("{id} is not an arrow connector");
+    };
+    let conn = scene
+        .connector(&conn_id)
+        .ok_or_else(|| anyhow::anyhow!("{id} is not an arrow connector"))?;
+    if conn.kind != "arrow" {
+        anyhow::bail!("{id} is not an arrow connector");
+    }
+    let (Some(start), Some(end)) = (
+        route_end(&scene, doc, &conn.start),
+        route_end(&scene, doc, &conn.end),
+    ) else {
+        anyhow::bail!("arrow {conn_id} must be attached at both ends to route with --via");
+    };
+    let via = parse_via(via)?;
+    let (start_fp, end_fp, abs) =
+        compute_via_route(&start.rect, start.gap, &end.rect, end.gap, via)?;
+    doc.set_value(&conn_id, "elbowed", serde_json::Value::Bool(true));
+    doc.set_value(&conn_id, "roundness", serde_json::Value::Null);
+    if start.bound {
+        set_fixed_point(doc, &conn_id, "startBinding", start_fp);
+    }
+    if end.bound {
+        set_fixed_point(doc, &conn_id, "endBinding", end_fp);
+    }
+    write_arrow_points(doc, &conn_id, &abs);
+    doc.refresh();
+    if let Some(label_id) = &conn.label_element {
+        let fraction = doc
+            .element(&conn_id)
+            .and_then(|el| el.label_position)
+            .unwrap_or(0.5);
+        let mut moved = std::collections::HashMap::new();
+        place_label(doc, label_id, &abs, fraction, &mut moved);
+        doc.refresh();
+    }
+    Ok(AuthorReport {
+        added: 0,
+        updated: 1,
+        removed: 0,
     })
 }
 

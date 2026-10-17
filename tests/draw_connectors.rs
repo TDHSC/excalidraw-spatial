@@ -14,10 +14,22 @@ fn temp_path(tag: &str) -> PathBuf {
         .expect("clock")
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "excal-t36-{}-{}-{tag}.excalidraw",
+        "excal-t37-{}-{}-{tag}.excalidraw",
         std::process::id(),
         nanos
     ))
+}
+
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(format!("{name}.excalidraw"))
+}
+
+fn copy_fixture(name: &str, tag: &str) -> PathBuf {
+    let dest = temp_path(tag);
+    std::fs::copy(fixture(name), &dest).expect("copy fixture");
+    dest
 }
 
 fn run(args: &[&str]) -> (i32, String, String) {
@@ -580,6 +592,396 @@ fn draw_connect_rejects_self_loops_and_text_endpoints() {
         stderr.contains(
             "excal: error: cannot connect note: endpoint must be a shape, group, or container"
         ),
+        "stderr={stderr:?}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+fn assert_report(stderr: &str, added: usize, updated: usize, removed: usize) {
+    assert!(
+        stderr.contains(&format!(
+            "excal: added {added} item(s), updated {updated} item(s), removed {removed} item(s)"
+        )),
+        "stderr={stderr:?}"
+    );
+}
+
+fn lint_rules(path: &str) -> Vec<String> {
+    let (code, stdout, stderr) = run(&["lint", path, "--format", "json"]);
+    assert!(
+        code == 0 || code == 1,
+        "stderr={stderr:?} stdout={stdout:?}"
+    );
+    let doc: serde_json::Value = serde_json::from_str(&stdout).expect("lint json");
+    doc["issues"]
+        .as_array()
+        .expect("issues")
+        .iter()
+        .filter_map(|issue| issue["rule"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[test]
+fn draw_route_lifts_crossing_arrow_above_the_node_it_cuts() {
+    let path = copy_fixture("arrows", "route-cross");
+    let path_s = path.to_str().expect("utf8 path");
+
+    let (code, stdout, stderr) = run(&[
+        "draw",
+        "route",
+        path_s,
+        "--id",
+        "arr_cross",
+        "--via",
+        "y=60",
+        "--in-place",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr:?} stdout={stdout:?}");
+    assert_report(&stderr, 0, 1, 0);
+
+    let doc = load(&path);
+    let arrow = element(&doc, "arr_cross");
+    assert_eq!(arrow["elbowed"], true);
+    assert!(arrow["roundness"].is_null());
+    assert_eq!(
+        arrow["startBinding"]["fixedPoint"],
+        serde_json::json!([0.5, 0])
+    );
+    assert_eq!(
+        arrow["endBinding"]["fixedPoint"],
+        serde_json::json!([0.5, 0])
+    );
+    assert_eq!(num(arrow, "x"), 70.0);
+    assert_eq!(num(arrow, "y"), 94.0);
+    assert_eq!(
+        arrow["points"],
+        serde_json::json!([[0, 0], [0, -34], [440, -34], [440, 0]])
+    );
+    assert!(
+        !lint_rules(path_s)
+            .iter()
+            .any(|rule| rule == "ARROW_CROSSING_NODE"),
+        "crossing should be gone: {:?}",
+        lint_rules(path_s)
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn draw_route_bends_a_near_attachment_below_its_target() {
+    let path = copy_fixture("arrows", "route-near");
+    let path_s = path.to_str().expect("utf8 path");
+
+    let (code, stdout, stderr) = run(&[
+        "draw",
+        "route",
+        path_s,
+        "--id",
+        "arr_near",
+        "--via",
+        "y=420",
+        "--in-place",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr:?} stdout={stdout:?}");
+    assert_report(&stderr, 0, 1, 0);
+
+    let near_doc = load(&path);
+    let arrow = element(&near_doc, "arr_near");
+    assert_eq!(
+        absolute_points(arrow),
+        vec![
+            (290.0, 186.0),
+            (290.0, 420.0),
+            (510.0, 420.0),
+            (510.0, 386.0)
+        ]
+    );
+    assert_eq!(arrow["elbowed"], true);
+    assert!(arrow["roundness"].is_null());
+    assert_eq!(
+        arrow["startBinding"]["fixedPoint"],
+        serde_json::json!([0.5, 1])
+    );
+    assert!(arrow["endBinding"].is_null());
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn draw_connect_via_routes_around_aligned_nodes_and_places_the_label() {
+    let path = temp_path("via-routes");
+    let path_s = path.to_str().expect("utf8 path");
+    let _ = std::fs::remove_file(&path);
+    seed_nodes(
+        path_s,
+        &[
+            (
+                "a",
+                "A",
+                &["--x", "0", "--y", "100", "--width", "140", "--height", "80"],
+            ),
+            (
+                "b",
+                "B",
+                &[
+                    "--x", "220", "--y", "100", "--width", "140", "--height", "80",
+                ],
+            ),
+            (
+                "c",
+                "C",
+                &[
+                    "--x", "440", "--y", "100", "--width", "140", "--height", "80",
+                ],
+            ),
+        ],
+    );
+
+    let (code, stdout, stderr) = run(&[
+        "draw",
+        "connect",
+        path_s,
+        "--from",
+        "a",
+        "--to",
+        "c",
+        "--id",
+        "ac",
+        "--via",
+        "y=220",
+        "--label",
+        "async",
+        "--in-place",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr:?} stdout={stdout:?}");
+    let doc = load(&path);
+    let arrow = element(&doc, "ac");
+    assert_eq!(
+        absolute_points(arrow),
+        vec![(70.0, 186.0), (70.0, 220.0), (510.0, 220.0), (510.0, 186.0)]
+    );
+    assert_eq!(arrow["elbowed"], true);
+    assert!(arrow["roundness"].is_null());
+    let label = element(&doc, "ac-label");
+    assert_eq!(num(label, "width"), 48.0);
+    assert_eq!(num(label, "height"), 20.0);
+    assert_eq!(num(label, "x"), 266.0);
+    assert_eq!(num(label, "y"), 210.0);
+    let rules = lint_rules(path_s);
+    assert!(
+        !rules
+            .iter()
+            .any(|rule| rule == "ARROW_CROSSING_NODE" || rule == "ARROW_LABEL_COLLISION"),
+        "rules={rules:?}"
+    );
+
+    let stacked = temp_path("via-x");
+    let stacked_s = stacked.to_str().expect("utf8 path");
+    let _ = std::fs::remove_file(&stacked);
+    seed_nodes(
+        stacked_s,
+        &[
+            (
+                "n1",
+                "N1",
+                &[
+                    "--x", "100", "--y", "100", "--width", "140", "--height", "80",
+                ],
+            ),
+            (
+                "n2",
+                "N2",
+                &[
+                    "--x", "100", "--y", "240", "--width", "140", "--height", "80",
+                ],
+            ),
+            (
+                "n3",
+                "N3",
+                &[
+                    "--x", "100", "--y", "380", "--width", "140", "--height", "80",
+                ],
+            ),
+        ],
+    );
+    let (code, stdout, stderr) = run(&[
+        "draw",
+        "connect",
+        stacked_s,
+        "--from",
+        "n1",
+        "--to",
+        "n3",
+        "--id",
+        "n13",
+        "--via",
+        "x=40",
+        "--in-place",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr:?} stdout={stdout:?}");
+    let stacked_doc = load(&stacked);
+    let arrow = element(&stacked_doc, "n13");
+    assert_eq!(
+        absolute_points(arrow),
+        vec![(94.0, 140.0), (40.0, 140.0), (40.0, 420.0), (94.0, 420.0)]
+    );
+    assert!(
+        !lint_rules(stacked_s)
+            .iter()
+            .any(|rule| rule == "ARROW_CROSSING_NODE"),
+        "rules={:?}",
+        lint_rules(stacked_s)
+    );
+
+    let channel = temp_path("via-z");
+    let channel_s = channel.to_str().expect("utf8 path");
+    let _ = std::fs::remove_file(&channel);
+    seed_nodes(
+        channel_s,
+        &[
+            (
+                "top_box",
+                "Top",
+                &[
+                    "--x", "100", "--y", "60", "--width", "140", "--height", "80",
+                ],
+            ),
+            (
+                "bot_box",
+                "Bot",
+                &[
+                    "--x", "400", "--y", "260", "--width", "140", "--height", "80",
+                ],
+            ),
+        ],
+    );
+    let (code, stdout, stderr) = run(&[
+        "draw",
+        "connect",
+        channel_s,
+        "--from",
+        "top_box",
+        "--to",
+        "bot_box",
+        "--id",
+        "tb",
+        "--via",
+        "y=200",
+        "--in-place",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr:?} stdout={stdout:?}");
+    let channel_doc = load(&channel);
+    let arrow = element(&channel_doc, "tb");
+    assert_eq!(
+        arrow["startBinding"]["fixedPoint"],
+        serde_json::json!([0.5, 1])
+    );
+    assert_eq!(
+        arrow["endBinding"]["fixedPoint"],
+        serde_json::json!([0.5, 0])
+    );
+    assert_eq!(
+        absolute_points(arrow),
+        vec![
+            (170.0, 146.0),
+            (170.0, 200.0),
+            (470.0, 200.0),
+            (470.0, 254.0)
+        ]
+    );
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&stacked);
+    let _ = std::fs::remove_file(&channel);
+}
+
+#[test]
+fn draw_via_and_route_reject_bad_waypoints_and_non_arrows() {
+    let path = temp_path("via-errors");
+    let path_s = path.to_str().expect("utf8 path");
+    let _ = std::fs::remove_file(&path);
+    seed_nodes(
+        path_s,
+        &[
+            (
+                "a",
+                "A",
+                &["--x", "0", "--y", "100", "--width", "140", "--height", "80"],
+            ),
+            (
+                "c",
+                "C",
+                &[
+                    "--x", "440", "--y", "100", "--width", "140", "--height", "80",
+                ],
+            ),
+        ],
+    );
+
+    let (code, stdout, stderr) = run(&[
+        "draw",
+        "connect",
+        path_s,
+        "--from",
+        "a",
+        "--to",
+        "c",
+        "--via",
+        "z=10",
+        "--in-place",
+    ]);
+    assert_eq!(code, 2, "stdout={stdout:?} stderr={stderr:?}");
+    assert_eq!(stdout, "");
+    assert!(
+        stderr.contains("excal: error: invalid --via \"z=10\": expected x=<N> or y=<N>"),
+        "stderr={stderr:?}"
+    );
+
+    let (code, stdout, stderr) = run(&[
+        "draw",
+        "connect",
+        path_s,
+        "--from",
+        "a",
+        "--to",
+        "c",
+        "--via",
+        "y=140",
+        "--in-place",
+    ]);
+    assert_eq!(code, 2, "stdout={stdout:?} stderr={stderr:?}");
+    assert!(
+        stderr.contains("excal: error: --via y=140 passes through endpoint bounds"),
+        "stderr={stderr:?}"
+    );
+
+    let arrows = fixture("arrows");
+    let arrows_s = arrows.to_str().expect("utf8 path");
+    let (code, stdout, stderr) = run(&[
+        "draw",
+        "route",
+        arrows_s,
+        "--id",
+        "arr_dangling",
+        "--via",
+        "y=60",
+    ]);
+    assert_eq!(code, 2, "stdout={stdout:?} stderr={stderr:?}");
+    assert!(
+        stderr.contains(
+            "excal: error: arrow arr_dangling must be attached at both ends to route with --via"
+        ),
+        "stderr={stderr:?}"
+    );
+
+    let flow = fixture("basic_flow");
+    let flow_s = flow.to_str().expect("utf8 path");
+    let (code, stdout, stderr) = run(&["draw", "route", flow_s, "--id", "client", "--via", "y=60"]);
+    assert_eq!(code, 2, "stdout={stdout:?} stderr={stderr:?}");
+    assert!(
+        stderr.contains("excal: error: client is not an arrow connector"),
         "stderr={stderr:?}"
     );
 
