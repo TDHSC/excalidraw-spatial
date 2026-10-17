@@ -392,16 +392,55 @@ fn retain_zone_membership(scene: &Scene, change: &mut Change, policy: RetainPoli
     for (id, _) in &change.resizes {
         pinned.insert(id.clone());
     }
+    let mut pushed: Vec<(String, f64, f64)> = Vec::new();
 
-    let (expanded, _) = super::expand_moves(scene, &change.moves);
-    let mut grown: HashMap<String, Rect> = scene
+    loop {
+        let mut all_moves = change.moves.clone();
+        all_moves.extend(pushed.iter().cloned());
+        let (expanded, _) = super::expand_moves(scene, &all_moves);
+        let pushed_ids: HashSet<String> = pushed.iter().map(|(id, _, _)| id.clone()).collect();
+        let mut grown = seed_grown(scene);
+        grow_membership(scene, &expanded, &pinned, &pushed_ids, policy, &mut grown);
+        if let Some((ripple, dx, dy)) = sibling_intrusion(scene, &expanded, &pinned, &grown) {
+            for id in ripple {
+                pushed.push((id.clone(), dx, dy));
+                pinned.insert(id);
+            }
+            continue;
+        }
+        change.moves.extend(pushed);
+        let mut resized: Vec<&crate::scene_graph::Container> = scene
+            .containers
+            .iter()
+            .filter(|container| container.kind == ContainerKind::Zone)
+            .filter(|container| grown[&container.id] != container.rect)
+            .collect();
+        resized.sort_by_key(|container| container.z);
+        for zone in resized {
+            change.resizes.push((zone.id.clone(), grown[&zone.id]));
+        }
+        return;
+    }
+}
+
+fn seed_grown(scene: &Scene) -> HashMap<String, Rect> {
+    scene
         .containers
         .iter()
         .filter(|container| container.kind == ContainerKind::Zone)
         .map(|container| (container.id.clone(), container.rect))
-        .collect();
+        .collect()
+}
 
-    for (id, dx, dy) in &expanded {
+fn grow_membership(
+    scene: &Scene,
+    expanded: &[(String, f64, f64)],
+    pinned: &HashSet<String>,
+    pushed_ids: &HashSet<String>,
+    policy: RetainPolicy,
+    grown: &mut HashMap<String, Rect>,
+) {
+    for (id, dx, dy) in expanded {
         if dx.abs() < 1e-9 && dy.abs() < 1e-9 {
             continue;
         }
@@ -426,15 +465,21 @@ fn retain_zone_membership(scene: &Scene, change: &mut Change, policy: RetainPoli
         if parent_zone.kind != ContainerKind::Zone {
             continue;
         }
-        if pinned_or_ancestor(scene, &pinned, &parent_id) {
+        if pinned_or_ancestor(scene, pinned, &parent_id) {
             continue;
         }
         let moved = rect.translate(*dx, *dy);
         if zone_admits(&parent_zone.rect, parent_zone.z, &moved, z, k_is_zone) {
             continue;
         }
-        if policy == RetainPolicy::Position
-            && (intentional_exit(
+        // A pushed sibling is translated to stay clear, not to leave its parent.
+        let item_policy = if pushed_ids.contains(id) {
+            RetainPolicy::Arrange
+        } else {
+            policy
+        };
+        if item_policy == RetainPolicy::Position
+            && intentional_exit(
                 scene,
                 parent_zone.rect,
                 &moved,
@@ -442,7 +487,7 @@ fn retain_zone_membership(scene: &Scene, change: &mut Change, policy: RetainPoli
                 k_is_zone,
                 id,
                 &parent_id,
-            ))
+            )
         {
             continue;
         }
@@ -474,7 +519,7 @@ fn retain_zone_membership(scene: &Scene, change: &mut Change, policy: RetainPoli
         if parent_zone.kind != ContainerKind::Zone {
             continue;
         }
-        if pinned_or_ancestor(scene, &pinned, &parent_id) {
+        if pinned_or_ancestor(scene, pinned, &parent_id) {
             continue;
         }
         let grown_q = grown[&parent_id];
@@ -492,17 +537,252 @@ fn retain_zone_membership(scene: &Scene, change: &mut Change, policy: RetainPoli
             title_encroached,
         );
     }
+}
 
-    let mut resized: Vec<&crate::scene_graph::Container> = scene
+#[derive(Clone, Copy)]
+enum PushSide {
+    Right,
+    Left,
+    Down,
+    Up,
+}
+
+fn sibling_intrusion(
+    scene: &Scene,
+    expanded: &[(String, f64, f64)],
+    pinned: &HashSet<String>,
+    grown: &HashMap<String, Rect>,
+) -> Option<(Vec<String>, f64, f64)> {
+    let mut growers: Vec<&crate::scene_graph::Container> = scene
         .containers
         .iter()
         .filter(|container| container.kind == ContainerKind::Zone)
         .filter(|container| grown[&container.id] != container.rect)
         .collect();
-    resized.sort_by_key(|container| container.z);
-    for zone in resized {
-        change.resizes.push((zone.id.clone(), grown[&zone.id]));
+    growers.sort_by_key(|zone| zone.z);
+    let mut siblings: Vec<&crate::scene_graph::Container> = scene
+        .containers
+        .iter()
+        .filter(|container| container.kind == ContainerKind::Zone)
+        .collect();
+    siblings.sort_by_key(|zone| zone.z);
+
+    for grower in growers {
+        let grown_a = grown[&grower.id];
+        for sibling in &siblings {
+            if sibling.id == grower.id || sibling.parent != grower.parent {
+                continue;
+            }
+            if pinned_or_ancestor(scene, pinned, &sibling.id) {
+                continue;
+            }
+            if grower.rect.overlaps(&sibling.rect) || !grown_a.overlaps(&sibling.rect) {
+                continue;
+            }
+            if !intrusion_attributed(scene, expanded, grower, &grown_a, sibling) {
+                continue;
+            }
+            let Some((side, dx, dy)) = push_delta(&grower.rect, &grown_a, &sibling.rect) else {
+                continue;
+            };
+            let ripple = same_band_ripple(scene, grower, sibling, &grown_a, side);
+            if ripple.is_empty() || !ripple_eligible(scene, expanded, grown, pinned, &ripple) {
+                continue;
+            }
+            return Some((ripple, dx, dy));
+        }
     }
+    None
+}
+
+fn claims(
+    z_rect: &Rect,
+    z_idx: usize,
+    item_rect: &Rect,
+    item_z: usize,
+    item_is_zone: bool,
+) -> bool {
+    zone_admits(z_rect, z_idx, item_rect, item_z, item_is_zone) && z_rect.contains_rect(item_rect)
+}
+
+fn intrusion_attributed(
+    scene: &Scene,
+    expanded: &[(String, f64, f64)],
+    grower: &crate::scene_graph::Container,
+    grown_a: &Rect,
+    sibling: &crate::scene_graph::Container,
+) -> bool {
+    let moved_descendant = expanded.iter().any(|(id, dx, dy)| {
+        if !is_descendant(scene, &grower.id, id) {
+            return false;
+        }
+        let Some((rect, z, is_zone)) = item_box(scene, id) else {
+            return false;
+        };
+        let moved = rect.translate(*dx, *dy);
+        zone_admits(grown_a, grower.z, &moved, z, is_zone)
+            && claims(&sibling.rect, sibling.z, &moved, z, is_zone)
+    });
+    if moved_descendant {
+        return true;
+    }
+    let claimed_child = scene.components.iter().any(|component| {
+        is_descendant(scene, &sibling.id, &component.id)
+            && claims(grown_a, grower.z, &component.rect, component.z, false)
+    }) || scene.containers.iter().any(|container| {
+        is_descendant(scene, &sibling.id, &container.id)
+            && claims(
+                grown_a,
+                grower.z,
+                &container.rect,
+                container.z,
+                container.kind == ContainerKind::Zone,
+            )
+    });
+    if claimed_child {
+        return true;
+    }
+    grown_a.contains_point(sibling.rect.center()) || sibling.rect.contains_point(grown_a.center())
+}
+
+fn item_box(scene: &Scene, id: &str) -> Option<(Rect, usize, bool)> {
+    if let Some(component) = scene.component(id) {
+        Some((component.rect, component.z, false))
+    } else {
+        scene.container(id).map(|container| {
+            (
+                container.rect,
+                container.z,
+                container.kind == ContainerKind::Zone,
+            )
+        })
+    }
+}
+
+fn push_delta(original: &Rect, grown: &Rect, sibling: &Rect) -> Option<(PushSide, f64, f64)> {
+    let gap = f64::from(MIN_GAP);
+    let mut best: Option<(PushSide, f64, f64)> = None;
+    let mut consider = |side: PushSide, dx: f64, dy: f64, horizontal: bool| {
+        let score = dx.abs() + dy.abs();
+        let replace = match best {
+            None => true,
+            Some((_, bx, by)) => {
+                let best_score = bx.abs() + by.abs();
+                score < best_score - 1e-9
+                    || ((score - best_score).abs() <= 1e-9 && horizontal && !side_horizontal(best))
+            }
+        };
+        if replace {
+            best = Some((side, dx, dy));
+        }
+    };
+    if sibling.x1 >= original.x2 - 0.5 {
+        consider(PushSide::Right, grown.x2 + gap - sibling.x1, 0.0, true);
+    }
+    if sibling.x2 <= original.x1 + 0.5 {
+        consider(PushSide::Left, grown.x1 - gap - sibling.x2, 0.0, true);
+    }
+    if sibling.y1 >= original.y2 - 0.5 {
+        consider(PushSide::Down, 0.0, grown.y2 + gap - sibling.y1, false);
+    }
+    if sibling.y2 <= original.y1 + 0.5 {
+        consider(PushSide::Up, 0.0, grown.y1 - gap - sibling.y2, false);
+    }
+    best
+}
+
+fn side_horizontal(best: Option<(PushSide, f64, f64)>) -> bool {
+    matches!(best, Some((PushSide::Right | PushSide::Left, _, _)))
+}
+
+fn same_band_ripple(
+    scene: &Scene,
+    grower: &crate::scene_graph::Container,
+    sibling: &crate::scene_graph::Container,
+    grown_a: &Rect,
+    side: PushSide,
+) -> Vec<String> {
+    let band = grown_a.union(&sibling.rect);
+    let same_parent = |parent: &Option<String>| parent == &grower.parent;
+    let mut members: Vec<(usize, bool, String, Rect)> = Vec::new();
+    for container in &scene.containers {
+        if same_parent(&container.parent) && container.id != grower.id {
+            members.push((container.z, false, container.id.clone(), container.rect));
+        }
+    }
+    for component in &scene.components {
+        if same_parent(&component.parent) && component.id != grower.id {
+            members.push((component.z, true, component.id.clone(), component.rect));
+        }
+    }
+    members.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)).then(a.2.cmp(&b.2)));
+    members
+        .into_iter()
+        .filter(|(_, _, _, rect)| in_ripple_band(rect, &band, &sibling.rect, side))
+        .map(|(_, _, id, _)| id)
+        .collect()
+}
+
+fn in_ripple_band(rect: &Rect, band: &Rect, sibling: &Rect, side: PushSide) -> bool {
+    match side {
+        PushSide::Right | PushSide::Left => {
+            let crosses = rect.y1 < band.y2 && band.y1 < rect.y2;
+            let beyond = match side {
+                PushSide::Right => rect.x1 >= sibling.x1 - 0.5,
+                PushSide::Left => rect.x2 <= sibling.x2 + 0.5,
+                _ => false,
+            };
+            crosses && beyond
+        }
+        PushSide::Down | PushSide::Up => {
+            let crosses = rect.x1 < band.x2 && band.x1 < rect.x2;
+            let beyond = match side {
+                PushSide::Down => rect.y1 >= sibling.y1 - 0.5,
+                PushSide::Up => rect.y2 <= sibling.y2 + 0.5,
+                _ => false,
+            };
+            crosses && beyond
+        }
+    }
+}
+
+fn ripple_eligible(
+    scene: &Scene,
+    expanded: &[(String, f64, f64)],
+    grown: &HashMap<String, Rect>,
+    pinned: &HashSet<String>,
+    ripple: &[String],
+) -> bool {
+    ripple.iter().all(|id| {
+        if pinned_or_ancestor(scene, pinned, id) {
+            return false;
+        }
+        if expanded
+            .iter()
+            .any(|(moved, _, _)| is_descendant(scene, id, moved))
+        {
+            return false;
+        }
+        match scene.container(id) {
+            Some(container) if container.kind == ContainerKind::Zone => {
+                grown[&container.id] == container.rect
+            }
+            _ => true,
+        }
+    })
+}
+
+#[cfg(test)]
+fn retain_zone_membership_for_test(scene: &Scene, change: &mut Change, arrange: bool) {
+    retain_zone_membership(
+        scene,
+        change,
+        if arrange {
+            RetainPolicy::Arrange
+        } else {
+            RetainPolicy::Position
+        },
+    );
 }
 
 fn intentional_exit(
@@ -938,6 +1218,57 @@ mod tests {
         assert!(
             (dy - 0.0).abs() < 1e-6,
             "B must not move vertically, dy={dy}"
+        );
+    }
+
+    fn fixture_p_plus_r() -> &'static str {
+        r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "z_prefill", "x": 430, "y": 55, "width": 560, "height": 210},
+    {"type": "text", "id": "z_prefill_title", "x": 446, "y": 67, "width": 420, "height": 25, "text": "2a. Prefill Cluster", "fontSize": 20},
+    {"type": "rectangle", "id": "z_rag", "x": 1030, "y": 55, "width": 610, "height": 210},
+    {"type": "text", "id": "z_rag_title", "x": 1046, "y": 67, "width": 200, "height": 25, "text": "2b. RAG", "fontSize": 20},
+    {"type": "rectangle", "id": "p_sched", "x": 460, "y": 115, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "p_node1", "x": 600, "y": 115, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "p_node2", "x": 810, "y": 115, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "embed_svc", "x": 1250, "y": 115, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "milvus", "x": 1450, "y": 115, "width": 160, "height": 75}
+  ]
+}"#
+    }
+
+    #[test]
+    fn eligibility_guard_skips_push_when_sibling_child_already_moved() {
+        let (_doc, scene) = scene_of(fixture_p_plus_r());
+        let mut change = Change {
+            moves: vec![
+                ("p_node2".to_string(), 370.0, 0.0),
+                ("embed_svc".to_string(), 0.0, 10.0),
+            ],
+            resizes: vec![],
+        };
+        retain_zone_membership_for_test(&scene, &mut change, true);
+        assert_eq!(
+            change.moves,
+            vec![
+                ("p_node2".to_string(), 370.0, 0.0),
+                ("embed_svc".to_string(), 0.0, 10.0),
+            ],
+            "already-moved embed_svc must block the z_rag push, got {:?}",
+            change.moves
+        );
+        assert_eq!(change.resizes.len(), 1, "{:?}", change.resizes);
+        let (id, rect) = &change.resizes[0];
+        assert_eq!(id, "z_prefill");
+        assert!(
+            (rect.x1 - 430.0).abs() < 1e-6
+                && (rect.y1 - 55.0).abs() < 1e-6
+                && (rect.width() - 950.0).abs() < 1e-6
+                && (rect.height() - 210.0).abs() < 1e-6,
+            "z_prefill grew to {:?}, want (430,55,950,210)",
+            rect
         );
     }
 }

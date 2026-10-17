@@ -1611,3 +1611,222 @@ fn distribute_on_fixture_p_plus_r_retains_then_clears_overlap() {
     let after = lint_json(&moved);
     assert_eq!(after["summary"]["errors"], 0, "lint={after}");
 }
+
+fn assert_no_overlap(doc_json: &str) {
+    let issues = lint_issues(doc_json);
+    assert!(
+        issues
+            .iter()
+            .all(|issue| issue["rule"] != "OVERLAP_COMPONENT"),
+        "overlaps: {}",
+        serde_json::to_string(&issues).expect("issues json")
+    );
+}
+
+fn assert_errors_zero(doc_json: &str) {
+    let lint = lint_json(doc_json);
+    assert_eq!(lint["summary"]["errors"], 0, "lint={lint}");
+    assert_no_overlap(doc_json);
+}
+
+#[test]
+fn distribute_full_containment_pushes_sibling_zone_and_keeps_parents() {
+    let path = write_fixture("b20-push-sibling.excalidraw", &fixture_p_plus_r());
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "distribute",
+        path_str,
+        "--ids",
+        "p_sched,p_node1,p_node2",
+        "--direction",
+        "horizontal",
+        "--gap",
+        "200",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: moved 5 item(s), resized 1 item(s), updated 0 connector(s)"),
+        "stderr={stderr}"
+    );
+
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "p_node1"), "x"), 820.0);
+    approx(num(element(&out, "p_node2"), "x"), 1180.0);
+    let prefill = element(&out, "z_prefill");
+    approx(num(prefill, "x"), 430.0);
+    approx(num(prefill, "y"), 55.0);
+    approx(num(prefill, "width"), 950.0);
+    approx(num(prefill, "height"), 210.0);
+    approx(num(element(&out, "z_rag"), "x"), 1420.0);
+    approx(num(element(&out, "z_rag_title"), "x"), 1436.0);
+    approx(num(element(&out, "embed_svc"), "x"), 1640.0);
+    approx(num(element(&out, "milvus"), "x"), 1840.0);
+    approx(num(element(&out, "z_rag"), "y"), 55.0);
+    approx(num(element(&out, "z_rag_title"), "y"), 67.0);
+    approx(num(element(&out, "embed_svc"), "y"), 115.0);
+    approx(num(element(&out, "milvus"), "y"), 115.0);
+
+    let scene = scene_of(&stdout);
+    assert_eq!(
+        scene.component("p_node2").unwrap().parent.as_deref(),
+        Some("z_prefill")
+    );
+    assert_eq!(
+        scene.component("embed_svc").unwrap().parent.as_deref(),
+        Some("z_rag")
+    );
+    assert_eq!(
+        scene.component("milvus").unwrap().parent.as_deref(),
+        Some("z_rag")
+    );
+    assert_errors_zero(&stdout);
+}
+
+#[test]
+fn distribute_pushes_larger_sibling_when_grown_zone_claims_its_child() {
+    let body = fixture_p_plus_r()
+        .replace(
+            r#"{"type": "rectangle", "id": "z_rag", "x": 1030, "y": 55, "width": 610, "height": 210}"#,
+            r#"{"type": "rectangle", "id": "z_rag", "x": 1030, "y": 55, "width": 1000, "height": 210}"#,
+        )
+        .replace(
+            r#"{"type": "rectangle", "id": "embed_svc", "x": 1250, "y": 115, "width": 160, "height": 75}"#,
+            r#"{"type": "rectangle", "id": "embed_svc", "x": 1050, "y": 115, "width": 160, "height": 75}"#,
+        );
+    let path = write_fixture("b20-larger-sibling.excalidraw", &body);
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "distribute",
+        path_str,
+        "--ids",
+        "p_sched,p_node1,p_node2",
+        "--direction",
+        "horizontal",
+        "--gap",
+        "120",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: moved 5 item(s), resized 1 item(s), updated 0 connector(s)"),
+        "stderr={stderr}"
+    );
+
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "p_node2"), "x"), 1020.0);
+    let prefill = element(&out, "z_prefill");
+    approx(num(prefill, "x"), 430.0);
+    approx(num(prefill, "y"), 55.0);
+    approx(num(prefill, "width"), 790.0);
+    approx(num(prefill, "height"), 210.0);
+    approx(num(element(&out, "z_rag"), "x"), 1260.0);
+    approx(num(element(&out, "embed_svc"), "x"), 1280.0);
+    approx(num(element(&out, "milvus"), "x"), 1680.0);
+
+    let scene = scene_of(&stdout);
+    assert_eq!(
+        scene.component("p_node2").unwrap().parent.as_deref(),
+        Some("z_prefill")
+    );
+    assert_eq!(
+        scene.component("embed_svc").unwrap().parent.as_deref(),
+        Some("z_rag")
+    );
+}
+
+#[test]
+fn distribute_push_cascades_into_enclosing_parent_zone() {
+    let inner = fixture_p_plus_r();
+    let elements_start = inner.find("\"elements\": [").expect("elements");
+    let body = format!(
+        "{}{{\"type\": \"rectangle\", \"id\": \"z_fabric\", \"x\": 0, \"y\": 0, \"width\": 1680, \"height\": 300}},\n    {{\"type\": \"text\", \"id\": \"z_fabric_title\", \"x\": 16, \"y\": 12, \"width\": 240, \"height\": 25, \"text\": \"2. GPU Fabric\", \"fontSize\": 20}},\n    {}",
+        &inner[..elements_start + "\"elements\": [".len()],
+        &inner[elements_start + "\"elements\": [".len()..]
+    );
+    let path = write_fixture("b20-nested-cascade.excalidraw", &body);
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "distribute",
+        path_str,
+        "--ids",
+        "p_sched,p_node1,p_node2",
+        "--direction",
+        "horizontal",
+        "--gap",
+        "200",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: moved 5 item(s), resized 2 item(s), updated 0 connector(s)"),
+        "stderr={stderr}"
+    );
+
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "p_node1"), "x"), 820.0);
+    approx(num(element(&out, "p_node2"), "x"), 1180.0);
+    let prefill = element(&out, "z_prefill");
+    approx(num(prefill, "x"), 430.0);
+    approx(num(prefill, "y"), 55.0);
+    approx(num(prefill, "width"), 950.0);
+    approx(num(prefill, "height"), 210.0);
+    approx(num(element(&out, "z_rag"), "x"), 1420.0);
+    let fabric = element(&out, "z_fabric");
+    approx(num(fabric, "x"), 0.0);
+    approx(num(fabric, "y"), 0.0);
+    approx(num(fabric, "width"), 2070.0);
+    approx(num(fabric, "height"), 300.0);
+
+    let scene = scene_of(&stdout);
+    assert_eq!(
+        scene.container("z_prefill").unwrap().parent.as_deref(),
+        Some("z_fabric")
+    );
+    assert_eq!(
+        scene.container("z_rag").unwrap().parent.as_deref(),
+        Some("z_fabric")
+    );
+}
+
+#[test]
+fn distribute_push_ripples_same_band_and_leaves_lower_row() {
+    let inner = fixture_p_plus_r();
+    let close = inner.rfind(']').expect("elements close");
+    let body = format!(
+        "{},\n    {{\"type\": \"rectangle\", \"id\": \"z_store\", \"x\": 1680, \"y\": 55, \"width\": 400, \"height\": 210}},\n    {{\"type\": \"rectangle\", \"id\": \"z_lower\", \"x\": 1030, \"y\": 305, \"width\": 560, \"height\": 220}},\n    {{\"type\": \"rectangle\", \"id\": \"st_a\", \"x\": 1720, \"y\": 115, \"width\": 140, \"height\": 75}},\n    {{\"type\": \"rectangle\", \"id\": \"st_b\", \"x\": 1900, \"y\": 115, \"width\": 140, \"height\": 75}},\n    {{\"type\": \"rectangle\", \"id\": \"lo_a\", \"x\": 1070, \"y\": 365, \"width\": 140, \"height\": 75}},\n    {{\"type\": \"rectangle\", \"id\": \"lo_b\", \"x\": 1250, \"y\": 365, \"width\": 140, \"height\": 75}}\n  {}",
+        &inner[..close],
+        &inner[close..]
+    );
+    let path = write_fixture("b20-ripple.excalidraw", &body);
+    let path_str = path.to_str().expect("utf-8 path");
+    let (code, stdout, stderr) = run_layout(&[
+        "layout",
+        "distribute",
+        path_str,
+        "--ids",
+        "p_sched,p_node1,p_node2",
+        "--direction",
+        "horizontal",
+        "--gap",
+        "200",
+    ]);
+    cleanup(&path);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("excal: moved 8 item(s), resized 1 item(s), updated 0 connector(s)"),
+        "stderr={stderr}"
+    );
+
+    let out = parse_json(&stdout);
+    approx(num(element(&out, "z_rag"), "x"), 1420.0);
+    approx(num(element(&out, "z_store"), "x"), 2070.0);
+    approx(num(element(&out, "st_a"), "x"), 2110.0);
+    approx(num(element(&out, "st_b"), "x"), 2290.0);
+    approx(num(element(&out, "z_lower"), "x"), 1030.0);
+    approx(num(element(&out, "lo_a"), "x"), 1070.0);
+    approx(num(element(&out, "lo_b"), "x"), 1250.0);
+}

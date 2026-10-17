@@ -444,3 +444,89 @@ fn scatter_gather_in_tight_zone_cotranslates_and_grows() {
     approx(zone.rect.x2, 1580.0);
     approx(zone.rect.width(), 1560.0);
 }
+
+#[test]
+fn fit_text_then_distribute_pushes_disjoint_sibling_zone() {
+    let tmp = make_temp_dir();
+    let path = tmp.0.join("llm_cluster.excalidraw");
+    let src = r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "z_fabric", "x": 0, "y": 0, "width": 1680, "height": 300},
+    {"type": "rectangle", "id": "z_prefill", "x": 400, "y": 55, "width": 590, "height": 210},
+    {"type": "rectangle", "id": "z_rag", "x": 1030, "y": 55, "width": 610, "height": 210},
+    {"type": "rectangle", "id": "p_sched", "x": 460, "y": 115, "width": 160, "height": 75, "boundElements": [{"type": "text", "id": "p_sched-label"}]},
+    {"type": "rectangle", "id": "p_node1", "x": 600, "y": 115, "width": 160, "height": 75, "boundElements": [{"type": "text", "id": "p_node1-label"}]},
+    {"type": "rectangle", "id": "p_node2", "x": 810, "y": 115, "width": 160, "height": 75, "boundElements": [{"type": "text", "id": "p_node2-label"}]},
+    {"type": "rectangle", "id": "embed_svc", "x": 1070, "y": 115, "width": 175, "height": 75, "boundElements": [{"type": "text", "id": "embed_svc-label"}]},
+    {"type": "rectangle", "id": "milvus", "x": 1330, "y": 115, "width": 250, "height": 75, "boundElements": [{"type": "text", "id": "milvus-label"}]},
+    {"type": "text", "id": "p_sched-label", "x": 460, "y": 115, "width": 0, "height": 0, "text": "KV-Aware Prefill\nRouter", "fontSize": 20, "lineHeight": 1.25, "containerId": "p_sched"},
+    {"type": "text", "id": "p_node1-label", "x": 600, "y": 115, "width": 0, "height": 0, "text": "Prefill Worker #1\n(H100 TP=8 FP8)", "fontSize": 20, "lineHeight": 1.25, "containerId": "p_node1"},
+    {"type": "text", "id": "p_node2-label", "x": 810, "y": 115, "width": 0, "height": 0, "text": "Prefill Worker #2\n(H100 TP=8 FP8)", "fontSize": 20, "lineHeight": 1.25, "containerId": "p_node2"},
+    {"type": "text", "id": "embed_svc-label", "x": 1070, "y": 115, "width": 0, "height": 0, "text": "BGE-M3 Embedding\nService", "fontSize": 20, "lineHeight": 1.25, "containerId": "embed_svc"},
+    {"type": "text", "id": "milvus-label", "x": 1330, "y": 115, "width": 0, "height": 0, "text": "Milvus HNSW\nShard", "fontSize": 20, "lineHeight": 1.25, "containerId": "milvus"}
+  ]
+}"#;
+    fs::write(&path, src).expect("write llm cluster");
+    let path_str = path.to_str().expect("utf8 path");
+    let (code, stdout, stderr) = run_layout_in_place(path_str, &["fit-text", "--all"]);
+    assert_eq!(code, 0, "fit-text failed\nstdout={stdout}\nstderr={stderr}");
+    let (code, stdout, stderr) = run_layout_in_place(
+        path_str,
+        &[
+            "distribute",
+            "--ids",
+            "p_sched,p_node1,p_node2",
+            "--direction",
+            "horizontal",
+            "--gap",
+            "95",
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "distribute failed\nstdout={stdout}\nstderr={stderr}"
+    );
+
+    let after = fs::read_to_string(&path).expect("read result");
+    let doc = excalidraw_spatial::schema::Document::parse(&after).expect("parse result");
+    let scene = excalidraw_spatial::scene_graph::Scene::build(&doc);
+    approx(scene.component("p_node1").unwrap().rect.x1, 755.0);
+    approx(scene.component("p_node2").unwrap().rect.x1, 1102.0);
+    let prefill = scene.container("z_prefill").unwrap();
+    approx(prefill.rect.x1, 400.0);
+    approx(prefill.rect.y1, 55.0);
+    approx(prefill.rect.width(), 994.0);
+    approx(prefill.rect.height(), 210.0);
+    approx(scene.container("z_rag").unwrap().rect.x1, 1434.0);
+    approx(scene.component("embed_svc").unwrap().rect.x1, 1441.5);
+    approx(scene.component("milvus").unwrap().rect.x1, 1734.0);
+    let fabric = scene.container("z_fabric").unwrap();
+    approx(fabric.rect.x1, 0.0);
+    approx(fabric.rect.y1, 0.0);
+    approx(fabric.rect.width(), 2084.0);
+    approx(fabric.rect.height(), 300.0);
+    assert_eq!(
+        scene.component("p_node2").unwrap().parent.as_deref(),
+        Some("z_prefill")
+    );
+    assert_eq!(
+        scene.component("embed_svc").unwrap().parent.as_deref(),
+        Some("z_rag")
+    );
+    assert_eq!(
+        scene.component("milvus").unwrap().parent.as_deref(),
+        Some("z_rag")
+    );
+
+    let lint_json = run_lint_json(path_str);
+    assert_eq!(lint_json["summary"]["errors"], 0, "lint={lint_json}");
+    let issues = lint_json["issues"].as_array().expect("issues");
+    assert!(
+        issues
+            .iter()
+            .all(|issue| issue["rule"] != "OVERLAP_COMPONENT"),
+        "overlaps: {lint_json}"
+    );
+}
