@@ -102,7 +102,6 @@ mkdir -p "$INSTALL_DIR"
 install -m 755 "${TMP_DIR}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
 
 echo "Installed ${BIN_NAME} to ${INSTALL_DIR}/${BIN_NAME}"
-"${INSTALL_DIR}/${BIN_NAME}" --version || true
 
 case ":${PATH}:" in
     *":${INSTALL_DIR}:"*) ;;
