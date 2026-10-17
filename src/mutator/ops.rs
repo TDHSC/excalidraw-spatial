@@ -355,7 +355,43 @@ fn place_policy(scene: &Scene, moved_id: &str, anchor_id: &str) -> RetainPolicy 
     }
 }
 
-fn cross_delta(anchor: Rect, moved: Rect, horizontal: bool, align: &PlaceAlign) -> f64 {
+pub(crate) struct RelativePlace<'a> {
+    pub anchor: Rect,
+    pub w: f64,
+    pub h: f64,
+    pub right_of: bool,
+    pub left_of: bool,
+    pub below: bool,
+    pub above: bool,
+    pub gap: f64,
+    pub align: &'a PlaceAlign,
+}
+
+/// Top-left of a new box placed relative to `anchor`.
+///
+/// Cross-axis alignment uses `cross_delta`: vertical for `right_of`/`left_of`,
+/// horizontal for `below`/`above`.
+pub(crate) fn relative_xy(place: RelativePlace<'_>) -> (f64, f64) {
+    let moved = Rect::from_xywh(0.0, 0.0, place.w, place.h);
+    let align = place.align;
+    if place.right_of {
+        let y = cross_delta(place.anchor, moved, false, align);
+        (place.anchor.x2 + place.gap, y)
+    } else if place.left_of {
+        let y = cross_delta(place.anchor, moved, false, align);
+        (place.anchor.x1 - place.gap - place.w, y)
+    } else if place.below {
+        let x = cross_delta(place.anchor, moved, true, align);
+        (x, place.anchor.y2 + place.gap)
+    } else if place.above {
+        let x = cross_delta(place.anchor, moved, true, align);
+        (x, place.anchor.y1 - place.gap - place.h)
+    } else {
+        (0.0, 0.0)
+    }
+}
+
+pub(crate) fn cross_delta(anchor: Rect, moved: Rect, horizontal: bool, align: &PlaceAlign) -> f64 {
     let (anchor_start, anchor_mid, anchor_end, moved_start, moved_mid, moved_end) = if horizontal {
         (
             anchor.x1,

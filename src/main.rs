@@ -173,8 +173,50 @@ fn draw_cmd(cmd: DrawCommands) -> i32 {
         return draw_init(file, output, init_force);
     }
 
-    eprintln!("excal: error: not implemented");
-    2
+    let mut doc = match load_or_init_draw(file) {
+        Ok(doc) => doc,
+        Err(e) => {
+            eprintln!("excal: error: {e}");
+            return 2;
+        }
+    };
+    let now_ms = match now_ms() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("excal: error: {e}");
+            return 2;
+        }
+    };
+    let report = match author::apply_draw(&mut doc, &cmd, now_ms) {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("excal: error: {e}");
+            return 2;
+        }
+    };
+    doc.finish(now_ms);
+
+    let scene = Scene::build(&doc);
+    let lint_file = draw_lint_file(file, output);
+    emit_draw_stderr(&report, &scene, lint_file);
+    write_draw_output(file, output, false, &doc)
+}
+
+fn load_or_init_draw(file: &str) -> anyhow::Result<Document> {
+    if file != "-" && !std::path::Path::new(file).exists() {
+        return Ok(Document::empty());
+    }
+    Document::load(file)
+}
+
+fn draw_lint_file<'a>(file: &'a str, output: &'a OutputArgs) -> &'a str {
+    if let Some(path) = output.output.as_deref() {
+        path
+    } else if output.in_place || file != "-" {
+        file
+    } else {
+        "<file>"
+    }
 }
 
 fn draw_init(file: &str, output: &OutputArgs, force: bool) -> i32 {

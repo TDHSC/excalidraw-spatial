@@ -1,6 +1,10 @@
-use crate::geometry::{Point, Rect};
+use crate::geometry::{ceil_px, Point, Rect};
+use crate::linter::text_factor;
+use crate::mutator::ops::{relative_xy, RelativePlace};
+use crate::mutator::sync_bindings::bound_text_xy;
 use crate::scene_graph::{Scene, Target};
 use crate::schema::{json_num, Document};
+use crate::text_metrics;
 use crate::{DrawCommands, DrawShape, PlaceAlign, StrokeStyle};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -384,12 +388,65 @@ pub fn apply_draw(
     match cmd {
         DrawCommands::Init { .. } => Ok(AuthorReport::default()),
         DrawCommands::Node {
-            label, edge_label, ..
+            id,
+            label,
+            shape,
+            x,
+            y,
+            right_of,
+            left_of,
+            below,
+            above,
+            gap,
+            align,
+            in_container,
+            from,
+            edge_label,
+            width,
+            height,
+            bg,
+            stroke,
+            stroke_style,
+            ..
         } => {
-            let _ = label.as_deref().map(normalize_text);
-            let _ = edge_label.as_deref().map(normalize_text);
-            let _ = (doc, now_ms);
-            anyhow::bail!("not implemented")
+            // `--in` and the connector itself are wired in T35 and T36.
+            // Gap still accounts for `--edge-label` when `--from` is set.
+            let _ = in_container;
+            let label = label.as_deref().map(normalize_text);
+            let edge_label = edge_label.as_deref().map(normalize_text);
+            let gap_label = if from.is_some() {
+                edge_label.as_deref()
+            } else {
+                None
+            };
+            draw_node(
+                doc,
+                NodeDraw {
+                    id,
+                    label: label.as_deref(),
+                    shape,
+                    place: Placement {
+                        x: *x,
+                        y: *y,
+                        right_of: right_of.as_deref(),
+                        left_of: left_of.as_deref(),
+                        below: below.as_deref(),
+                        above: above.as_deref(),
+                        gap: *gap,
+                        align: align.as_ref(),
+                        edge_label: gap_label,
+                    },
+                    width: *width,
+                    height: *height,
+                    style: ElementStyle {
+                        bg: bg.as_deref(),
+                        stroke: stroke.as_deref(),
+                        stroke_style: stroke_style.as_ref(),
+                        frame_id: None,
+                    },
+                    now_ms,
+                },
+            )
         }
         DrawCommands::Connect { label, .. } => {
             let _ = label.as_deref().map(normalize_text);
@@ -403,9 +460,41 @@ pub fn apply_draw(
             let _ = name.as_deref().map(normalize_text);
             anyhow::bail!("not implemented")
         }
-        DrawCommands::Text { text, .. } => {
-            let _ = normalize_text(text);
-            anyhow::bail!("not implemented")
+        DrawCommands::Text {
+            id,
+            text,
+            x,
+            y,
+            right_of,
+            left_of,
+            below,
+            above,
+            gap,
+            align,
+            font_size,
+            ..
+        } => {
+            let text = normalize_text(text);
+            draw_text(
+                doc,
+                TextDraw {
+                    id,
+                    text: &text,
+                    place: Placement {
+                        x: *x,
+                        y: *y,
+                        right_of: right_of.as_deref(),
+                        left_of: left_of.as_deref(),
+                        below: below.as_deref(),
+                        above: above.as_deref(),
+                        gap: *gap,
+                        align: align.as_ref(),
+                        edge_label: None,
+                    },
+                    font_size: *font_size,
+                    now_ms,
+                },
+            )
         }
         DrawCommands::Label { text, .. } => {
             let _ = normalize_text(text);
@@ -415,6 +504,192 @@ pub fn apply_draw(
             anyhow::bail!("not implemented")
         }
     }
+}
+
+fn shape_type_name(shape: &DrawShape) -> &'static str {
+    match shape {
+        DrawShape::Ellipse => "ellipse",
+        DrawShape::Diamond => "diamond",
+        DrawShape::Rectangle | DrawShape::Stickynote => "rectangle",
+    }
+}
+
+fn node_size(
+    shape: &DrawShape,
+    label: Option<&str>,
+    width: Option<f64>,
+    height: Option<f64>,
+) -> (f64, f64, f64, f64) {
+    let (tw, th) = match label {
+        Some(text) => text_metrics::estimate(text, 20.0, 1.25),
+        None => (0.0, 0.0),
+    };
+    let (auto_w, auto_h) = if label.is_some() {
+        let f = text_factor(shape_type_name(shape));
+        (
+            160.0_f64.max(ceil_px((tw + 48.0) / f)),
+            80.0_f64.max(ceil_px((th + 32.0) / f)),
+        )
+    } else {
+        (160.0, 80.0)
+    };
+    (width.unwrap_or(auto_w), height.unwrap_or(auto_h), tw, th)
+}
+
+fn anchor_rect(scene: &Scene, id: &str) -> anyhow::Result<Rect> {
+    match scene.resolve(id)? {
+        Target::Component(resolved) => scene
+            .component(&resolved)
+            .map(|component| component.rect)
+            .ok_or_else(|| anyhow::anyhow!("unknown id \"{id}\"")),
+        Target::Container(resolved) => scene
+            .container(&resolved)
+            .map(|container| container.rect)
+            .ok_or_else(|| anyhow::anyhow!("unknown id \"{id}\"")),
+        Target::Connector(_) => anyhow::bail!("unknown id \"{id}\""),
+    }
+}
+
+struct Placement<'a> {
+    x: Option<f64>,
+    y: Option<f64>,
+    right_of: Option<&'a str>,
+    left_of: Option<&'a str>,
+    below: Option<&'a str>,
+    above: Option<&'a str>,
+    gap: Option<f64>,
+    align: Option<&'a PlaceAlign>,
+    edge_label: Option<&'a str>,
+}
+
+fn place_xy(scene: &Scene, w: f64, h: f64, place: &Placement<'_>) -> anyhow::Result<(f64, f64)> {
+    if let (Some(x), Some(y)) = (place.x, place.y) {
+        return Ok((x, y));
+    }
+    let relative = place
+        .right_of
+        .or(place.left_of)
+        .or(place.below)
+        .or(place.above);
+    if let Some(anchor_id) = relative {
+        let anchor = anchor_rect(scene, anchor_id)?;
+        let gap = default_gap(
+            place.gap,
+            place.edge_label,
+            place.right_of.is_some() || place.left_of.is_some(),
+        );
+        let align = place.align.unwrap_or(&PlaceAlign::Center);
+        return Ok(relative_xy(RelativePlace {
+            anchor,
+            w,
+            h,
+            right_of: place.right_of.is_some(),
+            left_of: place.left_of.is_some(),
+            below: place.below.is_some(),
+            above: place.above.is_some(),
+            gap,
+            align,
+        }));
+    }
+    if scene.components.is_empty() && scene.containers.is_empty() {
+        return Ok((100.0, 100.0));
+    }
+    anyhow::bail!(
+        "node placement requires --x and --y or one of --right-of, --left-of, --below, --above"
+    )
+}
+
+fn default_gap(gap: Option<f64>, edge_label: Option<&str>, horizontal_relation: bool) -> f64 {
+    if let Some(gap) = gap {
+        return gap;
+    }
+    if let Some(edge_label) = edge_label {
+        let (el_w, el_h) = text_metrics::estimate(edge_label, 16.0, 1.25);
+        let dim = if horizontal_relation { el_w } else { el_h };
+        return 60.0_f64.max(ceil_px(dim + 24.0));
+    }
+    60.0
+}
+
+struct NodeDraw<'a> {
+    id: &'a str,
+    label: Option<&'a str>,
+    shape: &'a DrawShape,
+    place: Placement<'a>,
+    width: Option<f64>,
+    height: Option<f64>,
+    style: ElementStyle<'a>,
+    now_ms: i64,
+}
+
+fn draw_node(doc: &mut Document, node: NodeDraw<'_>) -> anyhow::Result<AuthorReport> {
+    let scene = Scene::build(doc);
+    validate_new_id(doc, &scene, node.id)?;
+    let (w, h, tw, th) = node_size(node.shape, node.label, node.width, node.height);
+    let (x, y) = place_xy(&scene, w, h, &node.place)?;
+    let rect = Rect::from_xywh(x, y, w, h);
+    let label_id = node.label.map(|_| derived_label_id(doc, node.id));
+    doc.push_element(shape_element(
+        node.id,
+        node.shape,
+        rect,
+        node.now_ms,
+        &node.style,
+        label_id.as_deref(),
+    ));
+    if let (Some(text), Some(label_id)) = (node.label, label_id.as_deref()) {
+        let (lx, ly) = bound_text_xy(&rect, tw, th, Some("center"), Some("middle"));
+        doc.push_element(text_element(
+            label_id,
+            Rect::from_xywh(lx, ly, tw, th),
+            text,
+            node.now_ms,
+            &TextStyle {
+                font_size: 20.0,
+                text_align: "center",
+                vertical_align: "middle",
+                container_id: Some(node.id),
+                frame_id: node.style.frame_id,
+            },
+        ));
+    }
+    Ok(AuthorReport {
+        added: 1,
+        ..AuthorReport::default()
+    })
+}
+
+struct TextDraw<'a> {
+    id: &'a str,
+    text: &'a str,
+    place: Placement<'a>,
+    font_size: Option<f64>,
+    now_ms: i64,
+}
+
+fn draw_text(doc: &mut Document, text: TextDraw<'_>) -> anyhow::Result<AuthorReport> {
+    let scene = Scene::build(doc);
+    validate_new_id(doc, &scene, text.id)?;
+    let font_size = text.font_size.unwrap_or(20.0);
+    let (tw, th) = text_metrics::estimate(text.text, font_size, 1.25);
+    let (x, y) = place_xy(&scene, tw, th, &text.place)?;
+    doc.push_element(text_element(
+        text.id,
+        Rect::from_xywh(x, y, tw, th),
+        text.text,
+        text.now_ms,
+        &TextStyle {
+            font_size,
+            text_align: "left",
+            vertical_align: "top",
+            container_id: None,
+            frame_id: None,
+        },
+    ));
+    Ok(AuthorReport {
+        added: 1,
+        ..AuthorReport::default()
+    })
 }
 
 #[allow(dead_code)]
@@ -496,6 +771,346 @@ mod tests {
         assert_eq!(derived_title_id(&doc, "zone"), "zone-title-2");
         assert_eq!(derived_connector_id(&doc, "a", "b"), "a-b-2");
         assert_eq!(derived_connector_id(&doc, "group:a", "b"), "group_a-b");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn node_cmd(
+        id: &str,
+        label: Option<&str>,
+        shape: DrawShape,
+        x: Option<f64>,
+        y: Option<f64>,
+        right_of: Option<&str>,
+        left_of: Option<&str>,
+        below: Option<&str>,
+        above: Option<&str>,
+        gap: Option<f64>,
+        align: Option<PlaceAlign>,
+        width: Option<f64>,
+        height: Option<f64>,
+        bg: Option<&str>,
+        stroke: Option<&str>,
+        stroke_style: Option<StrokeStyle>,
+    ) -> DrawCommands {
+        DrawCommands::Node {
+            file: "mem.excalidraw".to_string(),
+            id: id.to_string(),
+            label: label.map(str::to_string),
+            shape,
+            x,
+            y,
+            right_of: right_of.map(str::to_string),
+            left_of: left_of.map(str::to_string),
+            below: below.map(str::to_string),
+            above: above.map(str::to_string),
+            gap,
+            align,
+            in_container: None,
+            from: None,
+            edge_label: None,
+            elbow: false,
+            width,
+            height,
+            bg: bg.map(str::to_string),
+            stroke: stroke.map(str::to_string),
+            stroke_style,
+            output: crate::OutputArgs {
+                in_place: false,
+                output: None,
+            },
+        }
+    }
+
+    fn empty_doc() -> Document {
+        Document::empty()
+    }
+
+    fn element_num(el: &serde_json::Value, key: &str) -> f64 {
+        el[key].as_f64().expect(key)
+    }
+
+    #[test]
+    fn draw_node_places_relative_to_anchor_with_align_gap_and_style() {
+        let mut doc = empty_doc();
+        apply_draw(
+            &mut doc,
+            &node_cmd(
+                "anchor",
+                Some("Anchor"),
+                DrawShape::Rectangle,
+                Some(0.0),
+                Some(0.0),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(200.0),
+                Some(100.0),
+                None,
+                None,
+                None,
+            ),
+            1_700_000_000_000,
+        )
+        .expect("anchor");
+
+        // --left-of, align start: x = 0 - 60 - 160 = -220, y = 0.
+        apply_draw(
+            &mut doc,
+            &node_cmd(
+                "left",
+                Some("Left"),
+                DrawShape::Rectangle,
+                None,
+                None,
+                None,
+                Some("anchor"),
+                None,
+                None,
+                None,
+                Some(PlaceAlign::Start),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            1_700_000_000_000,
+        )
+        .expect("left");
+        let left = doc.value["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|el| el["id"] == "left")
+            .expect("left element");
+        assert_eq!(element_num(left, "x"), -220.0);
+        assert_eq!(element_num(left, "y"), 0.0);
+        assert_eq!(element_num(left, "width"), 160.0);
+        assert_eq!(element_num(left, "height"), 80.0);
+
+        // --above, align end, gap 80: y = 0 - 80 - 80 = -160, x = 200 - 160 = 40.
+        apply_draw(
+            &mut doc,
+            &node_cmd(
+                "up",
+                Some("Up"),
+                DrawShape::Rectangle,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("anchor"),
+                Some(80.0),
+                Some(PlaceAlign::End),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            1_700_000_000_000,
+        )
+        .expect("above");
+        let up = doc.value["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|el| el["id"] == "up")
+            .expect("up element");
+        assert_eq!(element_num(up, "x"), 40.0);
+        assert_eq!(element_num(up, "y"), -160.0);
+
+        // --below, align center: y = 100 + 60 = 160, x = (200 - 160) / 2 = 20.
+        apply_draw(
+            &mut doc,
+            &node_cmd(
+                "down",
+                Some("Down"),
+                DrawShape::Rectangle,
+                None,
+                None,
+                None,
+                None,
+                Some("anchor"),
+                None,
+                None,
+                Some(PlaceAlign::Center),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            1_700_000_000_000,
+        )
+        .expect("below");
+        let down = doc.value["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|el| el["id"] == "down")
+            .expect("down element");
+        assert_eq!(element_num(down, "x"), 20.0);
+        assert_eq!(element_num(down, "y"), 160.0);
+
+        // --right-of is covered with explicit size and style, including negative origin.
+        let mut styled = empty_doc();
+        apply_draw(
+            &mut styled,
+            &node_cmd(
+                "origin",
+                None,
+                DrawShape::Rectangle,
+                Some(-40.0),
+                Some(-20.0),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(200.0),
+                Some(100.0),
+                None,
+                None,
+                None,
+            ),
+            1_700_000_000_000,
+        )
+        .expect("origin");
+        apply_draw(
+            &mut styled,
+            &node_cmd(
+                "styled",
+                Some("Styled"),
+                DrawShape::Rectangle,
+                None,
+                None,
+                Some("origin"),
+                None,
+                None,
+                None,
+                Some(80.0),
+                Some(PlaceAlign::Center),
+                Some(200.0),
+                Some(100.0),
+                Some("#e7f5ff"),
+                Some("#1971c2"),
+                Some(StrokeStyle::Dashed),
+            ),
+            1_700_000_000_000,
+        )
+        .expect("styled");
+        let styled_el = styled.value["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|el| el["id"] == "styled")
+            .expect("styled element");
+        // origin x2 = 160; gap 80 => x = 240. Heights match, so center y stays -20.
+        assert_eq!(element_num(styled_el, "x"), 240.0);
+        assert_eq!(element_num(styled_el, "y"), -20.0);
+        assert_eq!(element_num(styled_el, "width"), 200.0);
+        assert_eq!(element_num(styled_el, "height"), 100.0);
+        assert_eq!(styled_el["backgroundColor"], "#e7f5ff");
+        assert_eq!(styled_el["strokeColor"], "#1971c2");
+        assert_eq!(styled_el["strokeStyle"], "dashed");
+    }
+
+    #[test]
+    fn draw_node_on_non_empty_canvas_requires_placement() {
+        let mut doc = empty_doc();
+        apply_draw(
+            &mut doc,
+            &node_cmd(
+                "anchor",
+                Some("Anchor"),
+                DrawShape::Rectangle,
+                Some(0.0),
+                Some(0.0),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            1_700_000_000_000,
+        )
+        .expect("anchor");
+        let err = apply_draw(
+            &mut doc,
+            &node_cmd(
+                "orphan",
+                Some("Orphan"),
+                DrawShape::Rectangle,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            1_700_000_000_000,
+        )
+        .expect_err("placement required")
+        .to_string();
+        assert_eq!(
+            err,
+            "node placement requires --x and --y or one of --right-of, --left-of, --below, --above"
+        );
+    }
+
+    #[test]
+    fn draw_node_normalizes_newline_escapes_without_trimming() {
+        let mut doc = empty_doc();
+        apply_draw(
+            &mut doc,
+            &node_cmd(
+                "dec",
+                Some("  Fraud / 3DS\nCheck  "),
+                DrawShape::Diamond,
+                Some(0.0),
+                Some(0.0),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            1_700_000_000_000,
+        )
+        .expect("diamond");
+        let label = doc.value["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|el| el["id"] == "dec-label")
+            .expect("label");
+        assert_eq!(label["text"], "  Fraud / 3DS\nCheck  ");
+        assert_eq!(label["originalText"], "  Fraud / 3DS\nCheck  ");
     }
 
     #[test]
