@@ -1,6 +1,6 @@
 use excalidraw_spatial::geometry::{Point, Rect};
 use excalidraw_spatial::linter::{run_lint, Severity};
-use excalidraw_spatial::scene_graph::{Attach, ComponentKind, ContainerKind, Scene};
+use excalidraw_spatial::scene_graph::{Attach, ComponentKind, ContainerKind, Scene, Target};
 use excalidraw_spatial::schema::Document;
 
 fn load(name: &str) -> Document {
@@ -1231,4 +1231,48 @@ fn overlapping_sibling_does_not_reserve_the_other_zones_title() {
     assert_eq!(z.title_element.as_deref(), Some("t"));
     assert_eq!(z2.title_element.as_deref(), Some("t2"));
     assert_eq!(z2.parent, None);
+}
+
+#[test]
+fn b24_resolve_matches_multiline_label_via_single_line_query() {
+    let scene = parse_scene(
+        r#"{
+            "elements": [
+                {
+                    "id": "cdn_waf",
+                    "type": "rectangle",
+                    "x": 100,
+                    "y": 100,
+                    "width": 160,
+                    "height": 80
+                },
+                {
+                    "id": "cdn_waf-label",
+                    "type": "text",
+                    "x": 110,
+                    "y": 120,
+                    "width": 140,
+                    "height": 40,
+                    "text": "Cloudflare WAF\n& CDN",
+                    "containerId": "cdn_waf"
+                }
+            ]
+        }"#,
+    );
+    assert_eq!(
+        scene
+            .component("cdn_waf")
+            .expect("cdn_waf")
+            .label
+            .as_deref(),
+        Some("Cloudflare WAF\n& CDN")
+    );
+    assert_eq!(
+        scene.resolve("Cloudflare WAF\n& CDN").unwrap(),
+        Target::Component("cdn_waf".to_string())
+    );
+    assert_eq!(
+        scene.resolve("Cloudflare WAF & CDN").unwrap(),
+        Target::Component("cdn_waf".to_string())
+    );
 }

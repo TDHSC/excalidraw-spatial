@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::formatter::ascii_map::{self, render};
 use crate::geometry::{fmt_point, fmt_px, fmt_rect};
-use crate::linter::{LintIssue, Severity};
+use crate::linter::{inline_text, LintIssue, Severity};
 use crate::scene_graph::{Attach, Component, ComponentKind, Connector, Container, Scene};
 use crate::spatial::{self, Track};
 
@@ -88,6 +88,8 @@ fn format_container(scene: &Scene, container: &Container) -> String {
     let name = container
         .name
         .as_deref()
+        .map(inline_text)
+        .filter(|name| !name.is_empty())
         .map(|name| format!(" \"{name}\""))
         .unwrap_or_default();
     let kids = spatial::children(scene, &container.id);
@@ -134,6 +136,8 @@ fn format_component(component: &Component, siblings: Option<&Vec<&Component>>) -
     let label = component
         .label
         .as_deref()
+        .map(inline_text)
+        .filter(|label| !label.is_empty())
         .map(|label| format!(" \"{label}\""))
         .unwrap_or_default();
     let center = component.rect.center();
@@ -216,6 +220,8 @@ fn format_connector(connector: &Connector) -> String {
     let label = connector
         .label
         .as_deref()
+        .map(inline_text)
+        .filter(|label| !label.is_empty())
         .map(|label| format!(" \"{label}\""))
         .unwrap_or_default();
     let kind = if connector.kind == "line" {

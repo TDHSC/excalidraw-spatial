@@ -100,8 +100,12 @@ pub fn run_lint(scene: &Scene, file: &str) -> Vec<LintIssue> {
     issues
 }
 
+pub fn inline_text(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn label_str(text: &str) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = inline_text(text);
     if collapsed.chars().count() > 30 {
         let truncated: String = collapsed.chars().take(30).collect();
         format!("{truncated}…")
@@ -130,6 +134,18 @@ mod tests {
             fix: None,
             command: None,
         }
+    }
+
+    #[test]
+    fn inline_text_collapses_whitespace_without_truncating() {
+        assert_eq!(inline_text("Cloudflare WAF\n& CDN"), "Cloudflare WAF & CDN");
+        assert_eq!(inline_text("  TLS 1.3\n\tmTLS  "), "TLS 1.3 mTLS");
+        assert_eq!(inline_text("   \n\t  "), "");
+        let long = "abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+        assert_eq!(long.chars().count(), 40);
+        assert_eq!(inline_text(long), long);
+        assert_eq!(label_str(long), format!("{}…", &long[..30]));
+        assert_eq!(label_str("Cloudflare WAF\n& CDN"), "Cloudflare WAF & CDN");
     }
 
     #[test]

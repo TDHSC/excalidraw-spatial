@@ -589,3 +589,151 @@ fn b21_fixture_f21_splits_serving_row_around_nested_zone() {
         "cli inspect missing right row:\n{stdout}"
     );
 }
+
+#[test]
+fn b24_multiline_labels_stay_on_one_inspect_bullet_and_json_keeps_newlines() {
+    let dir = std::env::temp_dir().join(format!(
+        "excal-t43-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("b24.excalidraw");
+    let path_s = path.to_str().expect("utf8 path").to_string();
+
+    let (code, _stdout, stderr) = run(&[
+        "draw",
+        "node",
+        &path_s,
+        "--id",
+        "cdn_waf",
+        "--label",
+        "Cloudflare WAF\\n& CDN",
+        "--x",
+        "100",
+        "--y",
+        "100",
+        "--in-place",
+    ]);
+    assert_eq!(code, 0, "draw cdn_waf stderr={stderr}");
+
+    let (code, _stdout, stderr) = run(&[
+        "draw",
+        "node",
+        &path_s,
+        "--id",
+        "api_gw",
+        "--label",
+        "GraphQL\\nAPI Gateway",
+        "--right-of",
+        "cdn_waf",
+        "--gap",
+        "120",
+        "--in-place",
+    ]);
+    assert_eq!(code, 0, "draw api_gw stderr={stderr}");
+
+    let (code, _stdout, stderr) = run(&[
+        "draw",
+        "zone",
+        &path_s,
+        "--id",
+        "z1",
+        "--title",
+        "1. Client &\\nEdge Tier",
+        "--children",
+        "cdn_waf,api_gw",
+        "--in-place",
+    ]);
+    assert_eq!(code, 0, "draw zone stderr={stderr}");
+
+    let (code, _stdout, stderr) = run(&[
+        "draw",
+        "connect",
+        &path_s,
+        "--from",
+        "cdn_waf",
+        "--to",
+        "api_gw",
+        "--id",
+        "a1",
+        "--label",
+        "TLS 1.3\\nmTLS",
+        "--in-place",
+    ]);
+    assert_eq!(code, 0, "draw connect stderr={stderr}");
+
+    let (code, stdout, stderr) = run(&["inspect", &path_s]);
+    assert_eq!(code, 0, "inspect stderr={stderr}");
+
+    let bullets: Vec<_> = stdout
+        .lines()
+        .filter(|line| line.starts_with("- "))
+        .collect();
+    for line in &bullets {
+        assert!(
+            !line.contains('\n'),
+            "inspect bullet must be a single line: {line:?}"
+        );
+    }
+    let expected = [
+        ("cdn_waf", "Cloudflare WAF & CDN"),
+        ("api_gw", "GraphQL API Gateway"),
+        ("z1", "1. Client & Edge Tier"),
+        ("a1", "TLS 1.3 mTLS"),
+    ];
+    for (id, label) in expected {
+        let line = bullets
+            .iter()
+            .find(|line| line.starts_with(&format!("- {id} ")))
+            .unwrap_or_else(|| panic!("missing inspect bullet for {id}:\\n{stdout}"));
+        assert!(
+            line.contains(&format!("\"{label}\"")),
+            "bullet for {id} should quote {label:?}, got {line}"
+        );
+        assert!(
+            !line.contains('\\'),
+            "collapsed label must not keep a backslash: {line}"
+        );
+    }
+
+    let (code, json_out, stderr) = run(&["inspect", &path_s, "--format", "json"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 0, "inspect json stderr={stderr}");
+    let v: serde_json::Value =
+        serde_json::from_str(&json_out).unwrap_or_else(|err| panic!("json: {err}\\n{json_out}"));
+    let component_label = |id: &str| {
+        v["components"]
+            .as_array()
+            .expect("components")
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap_or_else(|| panic!("missing component {id}"))["label"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{id} label is not a string"))
+            .to_string()
+    };
+    assert_eq!(component_label("cdn_waf"), "Cloudflare WAF\n& CDN");
+    assert_eq!(component_label("api_gw"), "GraphQL\nAPI Gateway");
+    let zone_name = v["containers"]
+        .as_array()
+        .expect("containers")
+        .iter()
+        .find(|c| c["id"] == "z1")
+        .expect("zone z1")["name"]
+        .as_str()
+        .expect("zone name");
+    assert_eq!(zone_name, "1. Client &\nEdge Tier");
+    let arrow_label = v["connectors"]
+        .as_array()
+        .expect("connectors")
+        .iter()
+        .find(|c| c["id"] == "a1")
+        .expect("connector a1")["label"]
+        .as_str()
+        .expect("arrow label");
+    assert_eq!(arrow_label, "TLS 1.3\nmTLS");
+}

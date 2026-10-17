@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::geometry::{Point, Rect};
 use crate::linter::{
-    label_str, text_factor, LintIssue, Severity, SHAPE_TYPES, TEXT_PAD_X, TEXT_PAD_Y,
+    inline_text, label_str, text_factor, LintIssue, Severity, SHAPE_TYPES, TEXT_PAD_X, TEXT_PAD_Y,
     ZONE_CHILD_AREA_RATIO, ZONE_CONTAINED_AREA_RATIO, ZONE_TITLE_BAND,
 };
 use crate::schema::{Document, RawElement};
@@ -505,23 +505,11 @@ impl Scene {
         }
 
         let needle = query.trim();
-        let mut label_matches: Vec<(usize, Target)> = Vec::new();
-        for component in &self.components {
-            if component
-                .label
-                .as_deref()
-                .is_some_and(|label| label.trim() == needle)
-            {
-                label_matches.push((component.z, Target::Component(component.id.clone())));
-            }
-        }
-        for container in &self.containers {
-            if container
-                .name
-                .as_deref()
-                .is_some_and(|name| name.trim() == needle)
-            {
-                label_matches.push((container.z, Target::Container(container.id.clone())));
+        let mut label_matches = self.label_matches(|label| label.trim() == needle);
+        if label_matches.is_empty() {
+            let collapsed = inline_text(needle);
+            if !collapsed.is_empty() {
+                label_matches = self.label_matches(|label| inline_text(label) == collapsed);
             }
         }
         label_matches.sort_by_key(|(z, _)| *z);
@@ -541,6 +529,26 @@ impl Scene {
                 anyhow::bail!("ambiguous id \"{query}\": matches {ids}")
             }
         }
+    }
+
+    fn label_matches(&self, matches: impl Fn(&str) -> bool) -> Vec<(usize, Target)> {
+        let mut label_matches = Vec::new();
+        for component in &self.components {
+            if component.label.as_deref().is_some_and(&matches) {
+                label_matches.push((component.z, Target::Component(component.id.clone())));
+            }
+        }
+        for container in &self.containers {
+            if container.name.as_deref().is_some_and(&matches) {
+                label_matches.push((container.z, Target::Container(container.id.clone())));
+            }
+        }
+        for connector in &self.connectors {
+            if connector.label.as_deref().is_some_and(&matches) {
+                label_matches.push((connector.z, Target::Connector(connector.id.clone())));
+            }
+        }
+        label_matches
     }
 }
 
