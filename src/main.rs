@@ -173,6 +173,10 @@ fn draw_cmd(cmd: DrawCommands) -> i32 {
         return draw_init(file, output, init_force);
     }
 
+    if let DrawCommands::Batch { script, .. } = &cmd {
+        return draw_batch(file, output, script.as_deref());
+    }
+
     let mut doc = match load_or_init_draw(file) {
         Ok(doc) => doc,
         Err(e) => {
@@ -200,6 +204,62 @@ fn draw_cmd(cmd: DrawCommands) -> i32 {
     let lint_file = draw_lint_file(file, output);
     emit_draw_stderr(&report, &scene, lint_file);
     write_draw_output(file, output, false, &doc)
+}
+
+fn draw_batch(file: &str, output: &OutputArgs, script: Option<&str>) -> i32 {
+    if file == "-" && script.is_none_or(|path| path == "-") {
+        eprintln!(
+            "excal: error: cannot read both document and batch script from stdin; pass --script <PATH>"
+        );
+        return 2;
+    }
+
+    let script_text = match read_batch_script(script) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("excal: error: {e}");
+            return 2;
+        }
+    };
+    let mut doc = match load_or_init_draw(file) {
+        Ok(doc) => doc,
+        Err(e) => {
+            eprintln!("excal: error: {e}");
+            return 2;
+        }
+    };
+    let now_ms = match now_ms() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("excal: error: {e}");
+            return 2;
+        }
+    };
+    let report = match author::batch::execute_script(&mut doc, &script_text, now_ms) {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("excal: error: {e}");
+            return 2;
+        }
+    };
+    doc.finish(now_ms);
+
+    let scene = Scene::build(&doc);
+    let lint_file = draw_lint_file(file, output);
+    emit_draw_stderr(&report, &scene, lint_file);
+    write_draw_output(file, output, false, &doc)
+}
+
+fn read_batch_script(script: Option<&str>) -> anyhow::Result<String> {
+    match script {
+        Some(path) if path != "-" => Ok(std::fs::read_to_string(path)?),
+        _ => {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            Ok(buf)
+        }
+    }
 }
 
 fn load_or_init_draw(file: &str) -> anyhow::Result<Document> {

@@ -1,3 +1,5 @@
+pub mod batch;
+
 use std::collections::HashSet;
 
 use crate::geometry::{ceil_px, clip_segment, polyline_point_at, Point, Rect};
