@@ -2,8 +2,9 @@ use crate::geometry::{ceil_px, Point, Rect};
 use crate::linter::text_factor;
 use crate::mutator::ops::{relative_xy, RelativePlace};
 use crate::mutator::sync_bindings::bound_text_xy;
-use crate::scene_graph::{Scene, Target};
+use crate::scene_graph::{ComponentKind, ContainerKind, Scene, Target};
 use crate::schema::{json_num, Document};
+use crate::spatial;
 use crate::text_metrics;
 use crate::{DrawCommands, DrawShape, PlaceAlign, StrokeStyle};
 
@@ -409,9 +410,8 @@ pub fn apply_draw(
             stroke_style,
             ..
         } => {
-            // `--in` and the connector itself are wired in T35 and T36.
+            // The connector itself is wired in T36.
             // Gap still accounts for `--edge-label` when `--from` is set.
-            let _ = in_container;
             let label = label.as_deref().map(normalize_text);
             let edge_label = edge_label.as_deref().map(normalize_text);
             let gap_label = if from.is_some() {
@@ -436,6 +436,7 @@ pub fn apply_draw(
                         align: align.as_ref(),
                         edge_label: gap_label,
                     },
+                    in_container: in_container.as_deref(),
                     width: *width,
                     height: *height,
                     style: ElementStyle {
@@ -452,13 +453,70 @@ pub fn apply_draw(
             let _ = label.as_deref().map(normalize_text);
             anyhow::bail!("not implemented")
         }
-        DrawCommands::Zone { title, .. } => {
-            let _ = normalize_text(title);
-            anyhow::bail!("not implemented")
+        DrawCommands::Zone {
+            id,
+            title,
+            children,
+            padding,
+            x,
+            y,
+            width,
+            height,
+            in_container,
+            bg,
+            stroke,
+            stroke_style,
+            ..
+        } => {
+            let title = normalize_text(title);
+            draw_zone(
+                doc,
+                ZoneDraw {
+                    id,
+                    title: &title,
+                    children,
+                    padding: *padding,
+                    x: *x,
+                    y: *y,
+                    width: *width,
+                    height: *height,
+                    in_container: in_container.as_deref(),
+                    style: ElementStyle {
+                        bg: bg.as_deref(),
+                        stroke: stroke.as_deref(),
+                        stroke_style: stroke_style.as_ref(),
+                        frame_id: None,
+                    },
+                    now_ms,
+                },
+            )
         }
-        DrawCommands::Frame { name, .. } => {
-            let _ = name.as_deref().map(normalize_text);
-            anyhow::bail!("not implemented")
+        DrawCommands::Frame {
+            id,
+            name,
+            children,
+            padding,
+            x,
+            y,
+            width,
+            height,
+            ..
+        } => {
+            let name = name.as_deref().map(normalize_text);
+            draw_frame(
+                doc,
+                FrameDraw {
+                    id,
+                    name: name.as_deref().unwrap_or("Frame"),
+                    children,
+                    padding: *padding,
+                    x: *x,
+                    y: *y,
+                    width: *width,
+                    height: *height,
+                    now_ms,
+                },
+            )
         }
         DrawCommands::Text {
             id,
@@ -616,6 +674,7 @@ struct NodeDraw<'a> {
     label: Option<&'a str>,
     shape: &'a DrawShape,
     place: Placement<'a>,
+    in_container: Option<&'a str>,
     width: Option<f64>,
     height: Option<f64>,
     style: ElementStyle<'a>,
@@ -625,21 +684,28 @@ struct NodeDraw<'a> {
 fn draw_node(doc: &mut Document, node: NodeDraw<'_>) -> anyhow::Result<AuthorReport> {
     let scene = Scene::build(doc);
     validate_new_id(doc, &scene, node.id)?;
+    let container = match node.in_container {
+        Some(cid) => Some(resolve_container_or_empty_zone(&scene, doc, cid)?),
+        None => None,
+    };
     let (w, h, tw, th) = node_size(node.shape, node.label, node.width, node.height);
-    let (x, y) = place_xy(&scene, w, h, &node.place)?;
+    let (x, y) = place_node_xy(&scene, w, h, &node.place, container.as_ref())?;
     let rect = Rect::from_xywh(x, y, w, h);
+    let frame_id = container.as_ref().and_then(|host| host.frame_id.clone());
+    let mut style = node.style;
+    style.frame_id = frame_id.as_deref();
     let label_id = node.label.map(|_| derived_label_id(doc, node.id));
-    doc.push_element(shape_element(
+    let shape = shape_element(
         node.id,
         node.shape,
         rect,
         node.now_ms,
-        &node.style,
+        &style,
         label_id.as_deref(),
-    ));
-    if let (Some(text), Some(label_id)) = (node.label, label_id.as_deref()) {
+    );
+    let label = node.label.zip(label_id.as_deref()).map(|(text, label_id)| {
         let (lx, ly) = bound_text_xy(&rect, tw, th, Some("center"), Some("middle"));
-        doc.push_element(text_element(
+        text_element(
             label_id,
             Rect::from_xywh(lx, ly, tw, th),
             text,
@@ -649,13 +715,75 @@ fn draw_node(doc: &mut Document, node: NodeDraw<'_>) -> anyhow::Result<AuthorRep
                 text_align: "center",
                 vertical_align: "middle",
                 container_id: Some(node.id),
-                frame_id: node.style.frame_id,
+                frame_id: style.frame_id,
             },
-        ));
-    }
-    Ok(AuthorReport {
+        )
+    });
+    let insert_at = container
+        .as_ref()
+        .and_then(|host| host.frame_id.as_deref())
+        .and_then(|frame_id| raw_index(doc, frame_id));
+    insert_pair(doc, insert_at, shape, label);
+    let mut report = AuthorReport {
         added: 1,
         ..AuthorReport::default()
+    };
+    if let Some(host) = container {
+        doc.refresh();
+        report.updated +=
+            expand_container_chain(doc, &scene, &host.id, &[(node.id.to_string(), rect)])?;
+    }
+    Ok(report)
+}
+
+fn place_node_xy(
+    scene: &Scene,
+    w: f64,
+    h: f64,
+    place: &Placement<'_>,
+    container: Option<&ResolvedContainer>,
+) -> anyhow::Result<(f64, f64)> {
+    if place.x.is_some()
+        || place.right_of.is_some()
+        || place.left_of.is_some()
+        || place.below.is_some()
+        || place.above.is_some()
+    {
+        return place_xy(scene, w, h, place);
+    }
+    if let Some(host) = container {
+        return Ok(place_in_container(scene, w, h, place, host));
+    }
+    place_xy(scene, w, h, place)
+}
+
+fn place_in_container(
+    scene: &Scene,
+    w: f64,
+    h: f64,
+    place: &Placement<'_>,
+    host: &ResolvedContainer,
+) -> (f64, f64) {
+    let kids = spatial::children(scene, &host.id);
+    if kids.is_empty() {
+        let y = host.rect.y1 + 40.0 + host.title_offset;
+        return (host.rect.x1 + 40.0, y);
+    }
+    let (_, anchor) = kids
+        .iter()
+        .max_by(|a, b| a.1.x2.total_cmp(&b.1.x2).then(a.0.cmp(&b.0)))
+        .expect("non-empty children");
+    let gap = default_gap(place.gap, place.edge_label, true);
+    relative_xy(RelativePlace {
+        anchor: *anchor,
+        w,
+        h,
+        right_of: true,
+        left_of: false,
+        below: false,
+        above: false,
+        gap,
+        align: &PlaceAlign::Center,
     })
 }
 
@@ -690,6 +818,690 @@ fn draw_text(doc: &mut Document, text: TextDraw<'_>) -> anyhow::Result<AuthorRep
         added: 1,
         ..AuthorReport::default()
     })
+}
+
+struct ZoneDraw<'a> {
+    id: &'a str,
+    title: &'a str,
+    children: &'a [String],
+    padding: Option<f64>,
+    x: Option<f64>,
+    y: Option<f64>,
+    width: Option<f64>,
+    height: Option<f64>,
+    in_container: Option<&'a str>,
+    style: ElementStyle<'a>,
+    now_ms: i64,
+}
+
+fn draw_zone(doc: &mut Document, zone: ZoneDraw<'_>) -> anyhow::Result<AuthorReport> {
+    let scene = Scene::build(doc);
+    validate_new_id(doc, &scene, zone.id)?;
+    let (tw, th) = text_metrics::estimate(zone.title, 20.0, 1.25);
+    let title_id = derived_title_id(doc, zone.id);
+    if !zone.children.is_empty() {
+        return draw_zone_children(doc, &scene, &zone, tw, th, &title_id);
+    }
+    let (x, y, width, height) = match (zone.x, zone.y, zone.width, zone.height) {
+        (Some(x), Some(y), Some(width), Some(height)) => (x, y, width, height),
+        _ => anyhow::bail!("not implemented"),
+    };
+    let rect = Rect::from_xywh(x, y, width, height);
+    let host = match zone.in_container {
+        Some(cid) => Some(resolve_container_or_empty_zone(&scene, doc, cid)?),
+        None => None,
+    };
+    let frame_id = host.as_ref().and_then(|host| host.frame_id.clone());
+    let (insert_at, expand_parent) = zone_rect_insert(doc, &scene, rect, host.as_ref());
+    let (shape, title) = zone_elements(&zone, rect, tw, th, &title_id, frame_id.as_deref());
+    insert_pair(doc, insert_at, shape, Some(title));
+    let mut report = AuthorReport {
+        added: 1,
+        ..AuthorReport::default()
+    };
+    if let Some(parent_id) = expand_parent {
+        doc.refresh();
+        report.updated +=
+            expand_container_chain(doc, &scene, &parent_id, &[(zone.id.to_string(), rect)])?;
+    }
+    Ok(report)
+}
+
+fn draw_zone_children(
+    doc: &mut Document,
+    scene: &Scene,
+    zone: &ZoneDraw<'_>,
+    tw: f64,
+    th: f64,
+    title_id: &str,
+) -> anyhow::Result<AuthorReport> {
+    let resolved = resolve_zone_children(scene, zone.children)?;
+    let parent = shared_parent(scene, &resolved)?;
+    let padding = zone.padding.unwrap_or(40.0);
+    let union = union_rects(resolved.iter().map(|child| child.rect));
+    let mut rect = Rect {
+        x1: union.x1 - padding,
+        y1: union.y1 - padding - (th + 10.0),
+        x2: (union.x2 + padding).max(union.x1 - padding + tw + 20.0),
+        y2: union.y2 + padding,
+    };
+    let max_child = resolved
+        .iter()
+        .map(|child| child.rect.area())
+        .fold(0.0, f64::max);
+    rect = scale_zone_area(rect, max_child);
+    let host = match zone.in_container {
+        Some(cid) => Some(resolve_container_or_empty_zone(scene, doc, cid)?),
+        None => parent
+            .as_deref()
+            .and_then(|pid| resolve_container_or_empty_zone(scene, doc, pid).ok()),
+    };
+    let frame_id = host.as_ref().and_then(|host| host.frame_id.clone());
+    let min_z = member_indices(doc, &resolved)
+        .into_iter()
+        .min()
+        .unwrap_or(0);
+    let (shape, title) = zone_elements(zone, rect, tw, th, title_id, frame_id.as_deref());
+    insert_pair(doc, Some(min_z), shape, Some(title));
+    let mut report = AuthorReport {
+        added: 1,
+        ..AuthorReport::default()
+    };
+    if let Some(host) = host {
+        doc.refresh();
+        report.updated +=
+            expand_container_chain(doc, scene, &host.id, &[(zone.id.to_string(), rect)])?;
+    }
+    Ok(report)
+}
+
+fn zone_elements(
+    zone: &ZoneDraw<'_>,
+    rect: Rect,
+    tw: f64,
+    th: f64,
+    title_id: &str,
+    frame_id: Option<&str>,
+) -> (serde_json::Value, serde_json::Value) {
+    let style = ElementStyle {
+        bg: zone.style.bg,
+        stroke: zone.style.stroke,
+        stroke_style: zone.style.stroke_style,
+        frame_id,
+    };
+    let shape = shape_element(
+        zone.id,
+        &DrawShape::Rectangle,
+        rect,
+        zone.now_ms,
+        &style,
+        Some(title_id),
+    );
+    let shape = with_null_roundness(shape);
+    let (tx, ty) = bound_text_xy(&rect, tw, th, Some("left"), Some("top"));
+    let title = text_element(
+        title_id,
+        Rect::from_xywh(tx, ty, tw, th),
+        zone.title,
+        zone.now_ms,
+        &TextStyle {
+            font_size: 20.0,
+            text_align: "left",
+            vertical_align: "top",
+            container_id: Some(zone.id),
+            frame_id,
+        },
+    );
+    (shape, title)
+}
+
+fn zone_rect_insert(
+    doc: &Document,
+    scene: &Scene,
+    rect: Rect,
+    host: Option<&ResolvedContainer>,
+) -> (Option<usize>, Option<String>) {
+    let captured = contained_items(scene, rect);
+    if captured.is_empty() {
+        let at = host
+            .and_then(|host| host.frame_id.as_deref())
+            .and_then(|frame_id| raw_index(doc, frame_id));
+        return (at, host.map(|host| host.id.clone()));
+    }
+    let mut min_z = captured
+        .iter()
+        .flat_map(|item| member_ids(scene, &item.id))
+        .filter_map(|id| raw_index(doc, &id))
+        .min()
+        .unwrap_or(0);
+    if let Some(floor) = enclosing_zone_floor(scene, rect) {
+        min_z = min_z.max(floor);
+    }
+    (Some(min_z), host.map(|host| host.id.clone()))
+}
+
+struct FrameDraw<'a> {
+    id: &'a str,
+    name: &'a str,
+    children: &'a [String],
+    padding: Option<f64>,
+    x: Option<f64>,
+    y: Option<f64>,
+    width: Option<f64>,
+    height: Option<f64>,
+    now_ms: i64,
+}
+
+fn draw_frame(doc: &mut Document, frame: FrameDraw<'_>) -> anyhow::Result<AuthorReport> {
+    let scene = Scene::build(doc);
+    validate_new_id(doc, &scene, frame.id)?;
+    if !frame.children.is_empty() {
+        return draw_frame_children(doc, &scene, &frame);
+    }
+    let (x, y, width, height) = match (frame.x, frame.y, frame.width, frame.height) {
+        (Some(x), Some(y), Some(width), Some(height)) => (x, y, width, height),
+        _ => anyhow::bail!("not implemented"),
+    };
+    doc.push_element(frame_element(
+        frame.id,
+        Rect::from_xywh(x, y, width, height),
+        frame.name,
+        frame.now_ms,
+    ));
+    Ok(AuthorReport {
+        added: 1,
+        ..AuthorReport::default()
+    })
+}
+
+fn draw_frame_children(
+    doc: &mut Document,
+    scene: &Scene,
+    frame: &FrameDraw<'_>,
+) -> anyhow::Result<AuthorReport> {
+    let resolved = resolve_frame_children(scene, doc, frame.children)?;
+    let padding = frame.padding.unwrap_or(40.0);
+    let rect = union_rects(resolved.iter().map(|child| child.rect)).inflate(padding);
+    let members = frame_member_ids(scene, &resolved);
+    for id in &members {
+        doc.set_value(
+            id,
+            "frameId",
+            serde_json::Value::String(frame.id.to_string()),
+        );
+    }
+    doc.refresh();
+    let max_z = members
+        .iter()
+        .filter_map(|id| raw_index(doc, id))
+        .max()
+        .unwrap_or(0);
+    doc.insert_element(
+        max_z + 1,
+        frame_element(frame.id, rect, frame.name, frame.now_ms),
+    );
+    Ok(AuthorReport {
+        added: 1,
+        ..AuthorReport::default()
+    })
+}
+
+struct ResolvedChild {
+    id: String,
+    rect: Rect,
+    kind: ChildKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChildKind {
+    Shape,
+    Group,
+    Zone,
+    Text,
+    Frame,
+}
+
+fn resolve_zone_children(scene: &Scene, ids: &[String]) -> anyhow::Result<Vec<ResolvedChild>> {
+    let resolved = resolve_children(scene, ids)?;
+    if !resolved.iter().any(|child| {
+        matches!(
+            child.kind,
+            ChildKind::Shape | ChildKind::Group | ChildKind::Zone
+        )
+    }) {
+        anyhow::bail!("zone requires at least one shape, group, or zone child");
+    }
+    Ok(resolved)
+}
+
+fn resolve_frame_children(
+    scene: &Scene,
+    doc: &Document,
+    ids: &[String],
+) -> anyhow::Result<Vec<ResolvedChild>> {
+    if ids.is_empty() {
+        anyhow::bail!("frame children cannot be frames or belong to another frame");
+    }
+    let resolved = resolve_children(scene, ids)?;
+    for child in &resolved {
+        if child.kind == ChildKind::Frame {
+            anyhow::bail!("frame children cannot be frames or belong to another frame");
+        }
+        for id in member_ids(scene, &child.id) {
+            if doc
+                .element(&id)
+                .and_then(|el| el.frame_id.as_deref())
+                .is_some_and(|frame_id| !frame_id.is_empty())
+            {
+                anyhow::bail!("frame children cannot be frames or belong to another frame");
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+fn resolve_children(scene: &Scene, ids: &[String]) -> anyhow::Result<Vec<ResolvedChild>> {
+    if ids.is_empty() {
+        anyhow::bail!("zone requires at least one shape, group, or zone child");
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut resolved = Vec::with_capacity(ids.len());
+    for id in ids {
+        if !seen.insert(id.clone()) {
+            anyhow::bail!("children must share the same parent container");
+        }
+        let target = scene.resolve(id)?;
+        let (resolved_id, rect, kind) = match target {
+            Target::Component(resolved_id) => {
+                let component = scene
+                    .component(&resolved_id)
+                    .ok_or_else(|| anyhow::anyhow!("unknown id \"{id}\""))?;
+                let kind = match component.kind {
+                    ComponentKind::Shape => ChildKind::Shape,
+                    ComponentKind::Group => ChildKind::Group,
+                    ComponentKind::Text => ChildKind::Text,
+                };
+                (resolved_id, component.rect, kind)
+            }
+            Target::Container(resolved_id) => {
+                let container = scene
+                    .container(&resolved_id)
+                    .ok_or_else(|| anyhow::anyhow!("unknown id \"{id}\""))?;
+                let kind = match container.kind {
+                    ContainerKind::Zone => ChildKind::Zone,
+                    ContainerKind::Frame => ChildKind::Frame,
+                };
+                (resolved_id, container.rect, kind)
+            }
+            Target::Connector(_) => anyhow::bail!("unknown id \"{id}\""),
+        };
+        resolved.push(ResolvedChild {
+            id: resolved_id,
+            rect,
+            kind,
+        });
+    }
+    Ok(resolved)
+}
+
+fn shared_parent(scene: &Scene, children: &[ResolvedChild]) -> anyhow::Result<Option<String>> {
+    let mut parents = children.iter().map(|child| parent_of(scene, &child.id));
+    let first = parents.next().flatten();
+    if parents.any(|parent| parent != first) {
+        anyhow::bail!("children must share the same parent container");
+    }
+    Ok(first)
+}
+
+fn parent_of(scene: &Scene, id: &str) -> Option<String> {
+    scene
+        .component(id)
+        .and_then(|component| component.parent.clone())
+        .or_else(|| {
+            scene
+                .container(id)
+                .and_then(|container| container.parent.clone())
+        })
+}
+
+struct ResolvedContainer {
+    id: String,
+    rect: Rect,
+    frame_id: Option<String>,
+    title_offset: f64,
+    title_width: f64,
+    is_zone: bool,
+}
+
+fn resolve_container_or_empty_zone(
+    scene: &Scene,
+    doc: &Document,
+    cid: &str,
+) -> anyhow::Result<ResolvedContainer> {
+    if let Some(container) = scene.container(cid) {
+        let title = title_metrics(
+            container.title_height,
+            container.title_element.as_deref(),
+            doc,
+        );
+        return Ok(ResolvedContainer {
+            id: container.id.clone(),
+            rect: container.rect,
+            frame_id: nearest_frame_id(scene, doc, &container.id, container.frame_id.clone()),
+            title_offset: title.map(|(th, _)| th + 10.0).unwrap_or(0.0),
+            title_width: title.map(|(_, tw)| tw).unwrap_or(0.0),
+            is_zone: container.kind == ContainerKind::Zone,
+        });
+    }
+    if let Some(component) = scene.component(cid) {
+        if component.kind == ComponentKind::Shape && is_empty_zone_shape(doc, component) {
+            let title = component
+                .label_size
+                .as_ref()
+                .map(|size| (size.height, size.width));
+            return Ok(ResolvedContainer {
+                id: component.id.clone(),
+                rect: component.rect,
+                frame_id: nearest_frame_id(scene, doc, &component.id, component.frame_id.clone()),
+                title_offset: title.map(|(th, _)| th + 10.0).unwrap_or(0.0),
+                title_width: title.map(|(_, tw)| tw).unwrap_or(0.0),
+                is_zone: true,
+            });
+        }
+    }
+    anyhow::bail!("{cid} is not a container")
+}
+
+fn is_empty_zone_shape(doc: &Document, component: &crate::scene_graph::Component) -> bool {
+    let Some(el) = doc.element(&component.id) else {
+        return false;
+    };
+    if !el.group_ids().is_empty() || el.element_type != "rectangle" {
+        return false;
+    }
+    let Some(label_id) = component.label_element.as_deref() else {
+        return false;
+    };
+    doc.element(label_id)
+        .and_then(|label| label.vertical_align.as_deref())
+        == Some("top")
+}
+
+fn nearest_frame_id(
+    scene: &Scene,
+    doc: &Document,
+    id: &str,
+    own_frame: Option<String>,
+) -> Option<String> {
+    if scene
+        .container(id)
+        .is_some_and(|container| container.kind == ContainerKind::Frame)
+    {
+        return Some(id.to_string());
+    }
+    if let Some(frame_id) = own_frame.filter(|frame_id| !frame_id.is_empty()) {
+        return Some(frame_id);
+    }
+    doc.element(id)
+        .and_then(|el| el.frame_id.clone())
+        .filter(|frame_id| !frame_id.is_empty())
+}
+
+fn title_metrics(
+    height: Option<f64>,
+    title_id: Option<&str>,
+    doc: &Document,
+) -> Option<(f64, f64)> {
+    let title = doc.element(title_id?)?;
+    let width = title.width();
+    let height = height
+        .filter(|h| *h > 0.0)
+        .unwrap_or_else(|| title.height());
+    (height > 0.0 && width > 0.0).then_some((height, width))
+}
+
+fn expand_container_chain(
+    doc: &mut Document,
+    old_scene: &Scene,
+    cid: &str,
+    added: &[(String, Rect)],
+) -> anyhow::Result<usize> {
+    let mut overrides: Vec<(String, Rect)> = Vec::new();
+    let mut current = Some(cid.to_string());
+    let mut added_here = added.to_vec();
+    while let Some(id) = current {
+        let host = resolve_container_or_empty_zone(old_scene, doc, &id)?;
+        let mut rects: Vec<Rect> = spatial::children(old_scene, &id)
+            .into_iter()
+            .map(|(child_id, rect)| {
+                overrides
+                    .iter()
+                    .find(|(over_id, _)| over_id == &child_id)
+                    .map(|(_, rect)| *rect)
+                    .unwrap_or(rect)
+            })
+            .collect();
+        rects.extend(added_here.iter().map(|(_, rect)| *rect));
+        if rects.is_empty() {
+            break;
+        }
+        let union = union_rects(rects.iter().copied());
+        let mut tight = union.inflate(40.0);
+        if host.is_zone {
+            if host.title_offset > 0.0 {
+                tight.y1 -= host.title_offset;
+            }
+            if host.title_width > 0.0 {
+                tight.x2 = tight.x2.max(tight.x1 + host.title_width + 20.0);
+            }
+        }
+        let mut new_rect = host.rect.union(&tight);
+        if host.is_zone {
+            let max_child = spatial::children(old_scene, &id)
+                .into_iter()
+                .map(|(_, rect)| rect.area())
+                .chain(added_here.iter().map(|(_, rect)| rect.area()))
+                .fold(0.0, f64::max);
+            new_rect = scale_zone_area(new_rect, max_child);
+        }
+        overrides.push((id.clone(), new_rect));
+        added_here.clear();
+        current = parent_of(old_scene, &id);
+    }
+    doc.refresh();
+    let scene_after_insert = Scene::build(doc);
+    let mut change = crate::mutator::Change {
+        moves: vec![],
+        resizes: overrides,
+    };
+    crate::mutator::strip_nops(&mut change, &scene_after_insert);
+    if change.is_empty() {
+        return Ok(0);
+    }
+    let report = crate::mutator::apply(doc, &scene_after_insert, &change)?;
+    Ok(report.resized + report.connectors)
+}
+
+fn scale_zone_area(rect: Rect, max_child: f64) -> Rect {
+    if max_child <= 0.60 * rect.area() || rect.area() <= 0.0 {
+        return rect;
+    }
+    let k = ((max_child / 0.60) / rect.area()).sqrt();
+    let w = ceil_px(rect.width() * k);
+    let h = ceil_px(rect.height() * k);
+    let center = rect.center();
+    Rect {
+        x1: center.x - w / 2.0,
+        y1: center.y - h / 2.0,
+        x2: center.x + w / 2.0,
+        y2: center.y + h / 2.0,
+    }
+}
+
+fn contained_items(scene: &Scene, rect: Rect) -> Vec<ResolvedChild> {
+    let mut items = Vec::new();
+    for component in scene.nodes() {
+        if rect.contains_point(component.rect.center()) && component.rect.area() < rect.area() {
+            let kind = match component.kind {
+                ComponentKind::Shape => ChildKind::Shape,
+                ComponentKind::Group => ChildKind::Group,
+                ComponentKind::Text => ChildKind::Text,
+            };
+            items.push(ResolvedChild {
+                id: component.id.clone(),
+                rect: component.rect,
+                kind,
+            });
+        }
+    }
+    for container in &scene.containers {
+        if rect.contains_point(container.rect.center()) && container.rect.area() < rect.area() {
+            items.push(ResolvedChild {
+                id: container.id.clone(),
+                rect: container.rect,
+                kind: match container.kind {
+                    ContainerKind::Zone => ChildKind::Zone,
+                    ContainerKind::Frame => ChildKind::Frame,
+                },
+            });
+        }
+    }
+    items
+}
+
+fn enclosing_zone_floor(scene: &Scene, rect: Rect) -> Option<usize> {
+    scene
+        .containers
+        .iter()
+        .filter(|container| container.kind == ContainerKind::Zone)
+        .filter(|container| {
+            container.rect.area() > rect.area()
+                && container.rect.contains_point(rect.center())
+                && container.rect.contains_rect(&rect)
+        })
+        .map(|container| container.z + 1)
+        .max()
+}
+
+fn member_ids(scene: &Scene, id: &str) -> Vec<String> {
+    if let Some(component) = scene.component(id) {
+        return component.elements.clone();
+    }
+    if let Some(container) = scene.container(id) {
+        return container.elements.clone();
+    }
+    vec![id.to_string()]
+}
+
+fn member_indices(doc: &Document, children: &[ResolvedChild]) -> Vec<usize> {
+    let mut indices = Vec::new();
+    for child in children {
+        for id in member_element_ids_from_doc(doc, &child.id) {
+            if let Some(index) = raw_index(doc, &id) {
+                indices.push(index);
+            }
+        }
+    }
+    indices
+}
+
+fn member_element_ids_from_doc(doc: &Document, id: &str) -> Vec<String> {
+    if let Some(el) = doc.element(id) {
+        if el.element_type == "text" || !el.group_ids().is_empty() {
+            return vec![id.to_string()];
+        }
+    }
+    let mut ids = vec![id.to_string()];
+    if let Some(elements) = doc.value.get("elements").and_then(|e| e.as_array()) {
+        for el in elements {
+            if el.get("containerId").and_then(|v| v.as_str()) == Some(id) {
+                if let Some(bound_id) = el.get("id").and_then(|v| v.as_str()) {
+                    ids.push(bound_id.to_string());
+                }
+            }
+        }
+    }
+    ids
+}
+
+fn frame_member_ids(scene: &Scene, children: &[ResolvedChild]) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for child in children {
+        collect_frame_members(scene, &child.id, &mut ids, &mut seen);
+    }
+    ids
+}
+
+fn collect_frame_members(
+    scene: &Scene,
+    id: &str,
+    ids: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    for member in member_ids(scene, id) {
+        if seen.insert(member.clone()) {
+            ids.push(member.clone());
+        }
+    }
+    if scene
+        .container(id)
+        .is_some_and(|container| container.kind == ContainerKind::Zone)
+    {
+        for (child_id, _) in spatial::children(scene, id) {
+            collect_frame_members(scene, &child_id, ids, seen);
+        }
+    }
+}
+
+fn union_rects(mut rects: impl Iterator<Item = Rect>) -> Rect {
+    let first = rects.next().unwrap_or(Rect {
+        x1: 0.0,
+        y1: 0.0,
+        x2: 0.0,
+        y2: 0.0,
+    });
+    rects.fold(first, |acc, rect| acc.union(&rect))
+}
+
+fn raw_index(doc: &Document, id: &str) -> Option<usize> {
+    doc.value
+        .get("elements")
+        .and_then(|elements| elements.as_array())
+        .and_then(|elements| {
+            elements
+                .iter()
+                .position(|el| el.get("id").and_then(|raw| raw.as_str()) == Some(id))
+        })
+}
+
+fn insert_pair(
+    doc: &mut Document,
+    at: Option<usize>,
+    first: serde_json::Value,
+    second: Option<serde_json::Value>,
+) {
+    match at {
+        Some(at) => {
+            doc.insert_element(at, first);
+            if let Some(second) = second {
+                doc.insert_element(at + 1, second);
+            }
+        }
+        None => {
+            doc.push_element(first);
+            if let Some(second) = second {
+                doc.push_element(second);
+            }
+        }
+    }
+}
+
+fn with_null_roundness(mut el: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = el.as_object_mut() {
+        obj.insert("roundness".to_string(), serde_json::Value::Null);
+    }
+    el
 }
 
 #[allow(dead_code)]
