@@ -1,4 +1,6 @@
-use crate::geometry::{ceil_px, clip_segment, Point, Rect};
+use std::collections::HashSet;
+
+use crate::geometry::{ceil_px, clip_segment, polyline_point_at, Point, Rect};
 use crate::linter::{text_factor, BINDING_GAP_BASE, SHAPE_TYPES};
 use crate::mutator::ops::{relative_xy, RelativePlace};
 use crate::mutator::sync_bindings::{
@@ -600,14 +602,15 @@ pub fn apply_draw(
                 },
             )
         }
-        DrawCommands::Label { text, .. } => {
-            let _ = normalize_text(text);
-            anyhow::bail!("not implemented")
+        DrawCommands::Label { id, text, .. } => {
+            let text = normalize_text(text);
+            draw_label(doc, id, &text, now_ms)
         }
         DrawCommands::Route { id, via, .. } => draw_route(doc, id, via),
-        DrawCommands::Remove { .. } | DrawCommands::Batch { .. } => {
-            anyhow::bail!("not implemented")
-        }
+        DrawCommands::Remove {
+            id, keep_arrows, ..
+        } => draw_remove(doc, id, *keep_arrows),
+        DrawCommands::Batch { .. } => anyhow::bail!("not implemented"),
     }
 }
 
@@ -1575,6 +1578,396 @@ fn draw_route(doc: &mut Document, id: &str, via: &str) -> anyhow::Result<AuthorR
         updated: 1,
         removed: 0,
     })
+}
+
+fn draw_label(
+    doc: &mut Document,
+    id: &str,
+    text: &str,
+    now_ms: i64,
+) -> anyhow::Result<AuthorReport> {
+    let scene = Scene::build(doc);
+    match scene.resolve(id)? {
+        Target::Component(comp_id) => label_component(doc, &scene, &comp_id, text, now_ms),
+        Target::Container(cid) => label_container(doc, &scene, &cid, text, now_ms),
+        Target::Connector(conn_id) => label_connector(doc, &scene, &conn_id, text, now_ms),
+    }
+}
+
+fn label_component(
+    doc: &mut Document,
+    scene: &Scene,
+    comp_id: &str,
+    text: &str,
+    now_ms: i64,
+) -> anyhow::Result<AuthorReport> {
+    let component = scene
+        .component(comp_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown id \"{comp_id}\""))?;
+    match component.kind {
+        ComponentKind::Group => {
+            anyhow::bail!("cannot relabel group component {comp_id}");
+        }
+        ComponentKind::Text => {
+            let el = doc
+                .element(comp_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown id \"{comp_id}\""))?;
+            let (tw, th) = text_metrics::estimate(text, el.font_size(), el.line_height());
+            set_text_size(doc, comp_id, text, tw, th);
+            Ok(AuthorReport {
+                updated: 1,
+                ..AuthorReport::default()
+            })
+        }
+        ComponentKind::Shape => {
+            let primary_id = component
+                .elements
+                .first()
+                .cloned()
+                .unwrap_or_else(|| comp_id.to_string());
+            if let Some(label_id) = component.label_element.clone() {
+                let el = doc
+                    .element(&label_id)
+                    .ok_or_else(|| anyhow::anyhow!("unknown id \"{label_id}\""))?;
+                let font_size = el.font_size();
+                let line_height = el.line_height();
+                let text_align = el.text_align.clone();
+                let vertical_align = el.vertical_align.clone();
+                let (tw, th) = text_metrics::estimate(text, font_size, line_height);
+                set_text_size(doc, &label_id, text, tw, th);
+                doc.set_value(
+                    &label_id,
+                    "containerId",
+                    serde_json::Value::String(primary_id.clone()),
+                );
+                doc.push_bound_element(&primary_id, "text", &label_id);
+                let (x, y) = bound_text_xy(
+                    &component.rect,
+                    tw,
+                    th,
+                    text_align.as_deref(),
+                    vertical_align.as_deref(),
+                );
+                doc.set_num(&label_id, "x", x);
+                doc.set_num(&label_id, "y", y);
+            } else {
+                let (tw, th) = text_metrics::estimate(text, 20.0, 1.25);
+                let label_id = derived_label_id(doc, comp_id);
+                let (x, y) = bound_text_xy(&component.rect, tw, th, Some("center"), Some("middle"));
+                let frame_id = doc.element(&primary_id).and_then(|el| el.frame_id.clone());
+                let label = text_element(
+                    &label_id,
+                    Rect::from_xywh(x, y, tw, th),
+                    text,
+                    now_ms,
+                    &TextStyle {
+                        font_size: 20.0,
+                        text_align: "center",
+                        vertical_align: "middle",
+                        container_id: Some(&primary_id),
+                        frame_id: frame_id.as_deref(),
+                    },
+                );
+                let at = raw_index(doc, &primary_id).map(|index| index + 1);
+                insert_at(doc, at, label);
+                doc.push_bound_element(&primary_id, "text", &label_id);
+            }
+            doc.refresh();
+            let scene_after = Scene::build(doc);
+            let mut change =
+                crate::mutator::ops::fit_text(&scene_after, Some(comp_id), false, None, None)?;
+            if let Some(parent_cid) = component.parent.as_deref() {
+                let fitted = change
+                    .resizes
+                    .iter()
+                    .find(|(id, _)| id == comp_id)
+                    .map(|(_, rect)| *rect)
+                    .unwrap_or(component.rect);
+                change
+                    .resizes
+                    .extend(ancestor_resizes(doc, &scene_after, parent_cid, fitted)?);
+            }
+            crate::mutator::strip_nops(&mut change, &scene_after);
+            let shape_resized = usize::from(change.resizes.iter().any(|(id, _)| id == comp_id));
+            let updated = if change.is_empty() {
+                1
+            } else {
+                let report = crate::mutator::apply(doc, &scene_after, &change)?;
+                1 + report.resized.saturating_sub(shape_resized) + report.connectors
+            };
+            Ok(AuthorReport {
+                updated,
+                ..AuthorReport::default()
+            })
+        }
+    }
+}
+
+fn ancestor_resizes(
+    doc: &Document,
+    scene: &Scene,
+    parent_cid: &str,
+    child_rect: Rect,
+) -> anyhow::Result<Vec<(String, Rect)>> {
+    let mut overrides = Vec::new();
+    let mut current = Some(parent_cid.to_string());
+    let mut added = vec![child_rect];
+    while let Some(id) = current {
+        let host = resolve_container_or_empty_zone(scene, doc, &id)?;
+        let mut rects: Vec<Rect> = spatial::children(scene, &id)
+            .into_iter()
+            .map(|(child_id, rect)| {
+                overrides
+                    .iter()
+                    .find(|(over_id, _)| over_id == &child_id)
+                    .map(|(_, rect)| *rect)
+                    .unwrap_or(rect)
+            })
+            .collect();
+        rects.extend(added.iter().copied());
+        if rects.is_empty() {
+            break;
+        }
+        let union = union_rects(rects.iter().copied());
+        let mut tight = union.inflate(40.0);
+        if host.is_zone {
+            if host.title_offset > 0.0 {
+                tight.y1 -= host.title_offset;
+            }
+            if host.title_width > 0.0 {
+                tight.x2 = tight.x2.max(tight.x1 + host.title_width + 20.0);
+            }
+        }
+        let mut new_rect = host.rect.union(&tight);
+        if host.is_zone {
+            let max_child = spatial::children(scene, &id)
+                .into_iter()
+                .map(|(_, rect)| rect.area())
+                .chain(added.iter().map(|rect| rect.area()))
+                .fold(0.0, f64::max);
+            new_rect = scale_zone_area(new_rect, max_child);
+        }
+        overrides.push((id.clone(), new_rect));
+        added.clear();
+        current = parent_of(scene, &id);
+    }
+    Ok(overrides)
+}
+
+fn label_container(
+    doc: &mut Document,
+    scene: &Scene,
+    cid: &str,
+    text: &str,
+    now_ms: i64,
+) -> anyhow::Result<AuthorReport> {
+    let container = scene
+        .container(cid)
+        .ok_or_else(|| anyhow::anyhow!("unknown id \"{cid}\""))?;
+    match container.kind {
+        ContainerKind::Frame => {
+            doc.set_value(cid, "name", serde_json::Value::String(text.to_string()));
+        }
+        ContainerKind::Zone => {
+            let (tw, th) = text_metrics::estimate(text, 20.0, 1.25);
+            if let Some(title_id) = container.title_element.clone() {
+                let bound = doc
+                    .element(&title_id)
+                    .and_then(|el| el.container_id.clone())
+                    .as_deref()
+                    == Some(cid);
+                set_text_size(doc, &title_id, text, tw, th);
+                if bound {
+                    doc.set_num(&title_id, "x", container.rect.x1 + 5.0);
+                    doc.set_num(&title_id, "y", container.rect.y1 + 5.0);
+                }
+            } else {
+                let title_id = derived_title_id(doc, cid);
+                let frame_id = doc.element(cid).and_then(|el| el.frame_id.clone());
+                let title = text_element(
+                    &title_id,
+                    Rect::from_xywh(container.rect.x1 + 5.0, container.rect.y1 + 5.0, tw, th),
+                    text,
+                    now_ms,
+                    &TextStyle {
+                        font_size: 20.0,
+                        text_align: "left",
+                        vertical_align: "top",
+                        container_id: Some(cid),
+                        frame_id: frame_id.as_deref(),
+                    },
+                );
+                let at = raw_index(doc, cid).map(|index| index + 1);
+                insert_at(doc, at, title);
+                doc.push_bound_element(cid, "text", &title_id);
+            }
+        }
+    }
+    Ok(AuthorReport {
+        updated: 1,
+        ..AuthorReport::default()
+    })
+}
+
+fn label_connector(
+    doc: &mut Document,
+    scene: &Scene,
+    conn_id: &str,
+    text: &str,
+    now_ms: i64,
+) -> anyhow::Result<AuthorReport> {
+    let connector = scene
+        .connector(conn_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown id \"{conn_id}\""))?;
+    let (tw, th) = text_metrics::estimate(text, 16.0, 1.25);
+    if let Some(label_id) = connector.label_element.clone() {
+        set_text_size(doc, &label_id, text, tw, th);
+        doc.refresh();
+        let fraction = doc
+            .element(conn_id)
+            .and_then(|el| el.label_position)
+            .unwrap_or(0.5);
+        let mut moved = std::collections::HashMap::new();
+        place_label(doc, &label_id, &connector.points, fraction, &mut moved);
+        doc.refresh();
+    } else {
+        let label_id = derived_label_id(doc, conn_id);
+        let center = polyline_point_at(&connector.points, 0.5);
+        let frame_id = doc.element(conn_id).and_then(|el| el.frame_id.clone());
+        let label = text_element(
+            &label_id,
+            Rect::from_xywh(center.x - tw / 2.0, center.y - th / 2.0, tw, th),
+            text,
+            now_ms,
+            &TextStyle {
+                font_size: 16.0,
+                text_align: "center",
+                vertical_align: "middle",
+                container_id: Some(conn_id),
+                frame_id: frame_id.as_deref(),
+            },
+        );
+        let at = raw_index(doc, conn_id).map(|index| index + 1);
+        insert_at(doc, at, label);
+        doc.push_bound_element(conn_id, "text", &label_id);
+    }
+    Ok(AuthorReport {
+        updated: 1,
+        ..AuthorReport::default()
+    })
+}
+
+fn set_text_size(doc: &mut Document, id: &str, text: &str, tw: f64, th: f64) {
+    doc.set_value(id, "text", serde_json::Value::String(text.to_string()));
+    doc.set_value(
+        id,
+        "originalText",
+        serde_json::Value::String(text.to_string()),
+    );
+    doc.set_num(id, "width", tw);
+    doc.set_num(id, "height", th);
+}
+
+fn insert_at(doc: &mut Document, at: Option<usize>, element: serde_json::Value) {
+    match at {
+        Some(at) => doc.insert_element(at, element),
+        None => doc.push_element(element),
+    }
+}
+
+fn draw_remove(doc: &mut Document, id: &str, keep_arrows: bool) -> anyhow::Result<AuthorReport> {
+    let scene = Scene::build(doc);
+    let mut to_remove = HashSet::new();
+    let mut removed = 1;
+    let mut updated = 0;
+    let cascade = match scene.resolve(id)? {
+        Target::Component(comp_id) => {
+            let component = scene
+                .component(&comp_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown id \"{comp_id}\""))?;
+            to_remove.extend(component.elements.iter().cloned());
+            Some(comp_id)
+        }
+        Target::Container(cid) => {
+            let container = scene
+                .container(&cid)
+                .ok_or_else(|| anyhow::anyhow!("unknown id \"{cid}\""))?;
+            to_remove.extend(container.elements.iter().cloned());
+            if container.kind == ContainerKind::Frame {
+                let survivors: Vec<String> = doc
+                    .elements
+                    .iter()
+                    .filter(|el| el.frame_id.as_deref() == Some(cid.as_str()))
+                    .map(|el| el.id.clone())
+                    .filter(|el_id| !to_remove.contains(el_id))
+                    .collect();
+                for el_id in survivors {
+                    doc.set_value(&el_id, "frameId", serde_json::Value::Null);
+                }
+            }
+            Some(cid)
+        }
+        Target::Connector(conn_id) => {
+            let connector = scene
+                .connector(&conn_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown id \"{conn_id}\""))?;
+            to_remove.insert(connector.id.clone());
+            if let Some(label_id) = &connector.label_element {
+                to_remove.insert(label_id.clone());
+            }
+            None
+        }
+    };
+    if let Some(target_id) = cascade {
+        let connectors = scene.connectors.clone();
+        for connector in connectors {
+            let start_hit = binding_hits(&connector.start, &target_id)
+                || binding_element_id(doc, &connector.id, "startBinding")
+                    .is_some_and(|bound| to_remove.contains(&bound));
+            let end_hit = binding_hits(&connector.end, &target_id)
+                || binding_element_id(doc, &connector.id, "endBinding")
+                    .is_some_and(|bound| to_remove.contains(&bound));
+            if !start_hit && !end_hit {
+                continue;
+            }
+            if keep_arrows {
+                if start_hit {
+                    doc.set_value(&connector.id, "startBinding", serde_json::Value::Null);
+                }
+                if end_hit {
+                    doc.set_value(&connector.id, "endBinding", serde_json::Value::Null);
+                }
+                updated += 1;
+            } else {
+                to_remove.insert(connector.id.clone());
+                if let Some(label_id) = &connector.label_element {
+                    to_remove.insert(label_id.clone());
+                }
+                removed += 1;
+            }
+        }
+    }
+    doc.remove_elements(&to_remove);
+    doc.remove_bound_references(&to_remove);
+    Ok(AuthorReport {
+        updated,
+        removed,
+        ..AuthorReport::default()
+    })
+}
+
+fn binding_hits(attach: &Attach, target_id: &str) -> bool {
+    matches!(attach, Attach::Bound { target, .. } if target == target_id)
+}
+
+fn binding_element_id(doc: &Document, id: &str, key: &str) -> Option<String> {
+    doc.element(id)
+        .and_then(|el| match key {
+            "startBinding" => el.start_binding.as_ref(),
+            "endBinding" => el.end_binding.as_ref(),
+            _ => None,
+        })
+        .and_then(|binding| binding.element_id.clone())
 }
 
 fn draw_text(doc: &mut Document, text: TextDraw<'_>) -> anyhow::Result<AuthorReport> {
