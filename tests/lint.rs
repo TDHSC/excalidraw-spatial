@@ -585,3 +585,68 @@ fn b15c_cross_swimlane_near_miss_alignment() {
         serde_json::to_string_pretty(&v["issues"]).unwrap()
     );
 }
+
+/// Fixture F21: nested sub-zone `z_shards` sits between the left and right
+/// serving pipelines inside `z_serving`.
+fn fixture_f21() -> String {
+    r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "z_serving", "x": 0, "y": 0, "width": 1560, "height": 520},
+    {"type": "text", "id": "z_serving_title", "x": 16, "y": 12, "width": 100, "height": 25, "text": "Serving", "fontSize": 20, "textAlign": "left"},
+    {"type": "rectangle", "id": "search_ui", "x": 40, "y": 220, "width": 160, "height": 80},
+    {"type": "rectangle", "id": "q_rewrite", "x": 260, "y": 220, "width": 160, "height": 80},
+    {"type": "rectangle", "id": "blender", "x": 510, "y": 220, "width": 160, "height": 80},
+    {"type": "rectangle", "id": "z_shards", "x": 730, "y": 60, "width": 300, "height": 420},
+    {"type": "text", "id": "z_shards_title", "x": 746, "y": 72, "width": 100, "height": 25, "text": "Shards", "fontSize": 20, "textAlign": "left"},
+    {"type": "rectangle", "id": "shard_1", "x": 800, "y": 115, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "shard_2", "x": 800, "y": 222.5, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "shard_3", "x": 800, "y": 330, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "l1_ranker", "x": 1090, "y": 220, "width": 160, "height": 80},
+    {"type": "rectangle", "id": "l2_reranker", "x": 1310, "y": 220, "width": 160, "height": 80}
+  ]
+}"#
+    .to_string()
+}
+
+#[test]
+fn b21_fixture_f21_uneven_spacing_does_not_cross_nested_zone() {
+    let dir = make_temp_dir("b21");
+    let path = dir.join("f.excalidraw");
+    fs::write(&path, fixture_f21()).expect("write F21");
+    let v = lint_json_in(&dir);
+    let _ = fs::remove_dir_all(&dir);
+
+    let uneven = issues_with_rule(&v, "UNEVEN_SPACING");
+    let left: Vec<_> = uneven
+        .iter()
+        .filter(|issue| {
+            issue["targets"] == serde_json::json!(["search_ui", "q_rewrite", "blender"])
+        })
+        .collect();
+    assert_eq!(
+        left.len(),
+        1,
+        "expected one UNEVEN_SPACING on the left pipeline, got {}",
+        serde_json::to_string_pretty(&v["issues"]).unwrap()
+    );
+    assert_eq!(
+        left[0]["command"],
+        "excal layout distribute f.excalidraw --ids search_ui,q_rewrite,blender --direction horizontal --gap 90"
+    );
+    assert!(
+        uneven.iter().all(|issue| {
+            let targets = issue["targets"].as_array().expect("targets");
+            !(targets.iter().any(|id| id == "blender")
+                && targets.iter().any(|id| id == "l1_ranker"))
+        }),
+        "no issue may group blender with l1_ranker: {}",
+        serde_json::to_string_pretty(&v["issues"]).unwrap()
+    );
+    assert_eq!(
+        uneven.len(),
+        1,
+        "exactly one UNEVEN_SPACING, got {uneven:?}"
+    );
+}

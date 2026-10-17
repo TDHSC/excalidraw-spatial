@@ -7,6 +7,7 @@ use excalidraw_spatial::geometry::{Point, Rect};
 use excalidraw_spatial::scene_graph::{
     Attach, Component, ComponentKind, Connector, Container, ContainerKind, Scene,
 };
+use excalidraw_spatial::schema::Document;
 const FIXTURES: [&str; 6] = [
     "arrows",
     "basic_flow",
@@ -504,5 +505,87 @@ canvas (empty) | components: 0, containers: 0, connectors: 0 | errors: 0, warnin
 ## Issues
 (none)
 "
+    );
+}
+
+/// Fixture F21: nested sub-zone `z_shards` sits between the left and right
+/// serving pipelines inside `z_serving`.
+fn fixture_f21() -> String {
+    r#"{
+  "type": "excalidraw",
+  "version": 2,
+  "elements": [
+    {"type": "rectangle", "id": "z_serving", "x": 0, "y": 0, "width": 1560, "height": 520},
+    {"type": "text", "id": "z_serving_title", "x": 16, "y": 12, "width": 100, "height": 25, "text": "Serving", "fontSize": 20, "textAlign": "left"},
+    {"type": "rectangle", "id": "search_ui", "x": 40, "y": 220, "width": 160, "height": 80},
+    {"type": "rectangle", "id": "q_rewrite", "x": 260, "y": 220, "width": 160, "height": 80},
+    {"type": "rectangle", "id": "blender", "x": 510, "y": 220, "width": 160, "height": 80},
+    {"type": "rectangle", "id": "z_shards", "x": 730, "y": 60, "width": 300, "height": 420},
+    {"type": "text", "id": "z_shards_title", "x": 746, "y": 72, "width": 100, "height": 25, "text": "Shards", "fontSize": 20, "textAlign": "left"},
+    {"type": "rectangle", "id": "shard_1", "x": 800, "y": 115, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "shard_2", "x": 800, "y": 222.5, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "shard_3", "x": 800, "y": 330, "width": 160, "height": 75},
+    {"type": "rectangle", "id": "l1_ranker", "x": 1090, "y": 220, "width": 160, "height": 80},
+    {"type": "rectangle", "id": "l2_reranker", "x": 1310, "y": 220, "width": 160, "height": 80}
+  ]
+}"#
+    .to_string()
+}
+
+#[test]
+fn b21_fixture_f21_splits_serving_row_around_nested_zone() {
+    let doc = Document::parse(&fixture_f21()).expect("parse F21");
+    let scene = Scene::build(&doc);
+    let shards = scene
+        .containers
+        .iter()
+        .find(|c| c.id == "z_shards")
+        .expect("z_shards");
+    assert_eq!(shards.parent.as_deref(), Some("z_serving"));
+
+    let report = format_inspect("f21.excalidraw", &scene, &[]);
+    let rows: Vec<_> = report
+        .lines()
+        .skip_while(|line| *line != "## Rows")
+        .skip(1)
+        .take_while(|line| !line.is_empty() && *line != "(none)")
+        .filter(|line| line.contains("z_serving"))
+        .collect();
+    assert!(
+        rows.contains(&"- z_serving y≈260: search_ui --60-- q_rewrite --90-- blender"),
+        "missing left serving row: {rows:?}"
+    );
+    assert!(
+        rows.contains(&"- z_serving y≈260: l1_ranker --60-- l2_reranker"),
+        "missing right serving row: {rows:?}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|line| line.contains("blender") && line.contains("l1_ranker")),
+        "blender must not share a row with l1_ranker: {rows:?}"
+    );
+
+    let dir = std::env::temp_dir().join(format!(
+        "excal-t41-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("f21.excalidraw");
+    std::fs::write(&path, fixture_f21()).expect("write F21");
+    let (code, stdout, stderr) = run(&["inspect", path.to_str().expect("path")]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(
+        stdout.contains("- z_serving y≈260: search_ui --60-- q_rewrite --90-- blender"),
+        "cli inspect missing left row:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("- z_serving y≈260: l1_ranker --60-- l2_reranker"),
+        "cli inspect missing right row:\n{stdout}"
     );
 }

@@ -47,10 +47,12 @@ pub fn text_overflow(scene: &Scene, file: &str) -> Vec<LintIssue> {
 pub fn near_miss_alignment(scene: &Scene, file: &str) -> Vec<LintIssue> {
     let mut issues = Vec::new();
     for siblings in sibling_groups(scene) {
-        for track in spatial::rows(&siblings) {
+        let parent = siblings.first().and_then(|c| c.parent.as_deref());
+        let obstacles = spatial::sibling_container_rects(scene, parent);
+        for track in spatial::rows_with_obstacles(&siblings, &obstacles) {
             emit_near_miss(scene, file, &track, true, &mut issues);
         }
-        for track in spatial::columns(&siblings) {
+        for track in spatial::columns_with_obstacles(&siblings, &obstacles) {
             emit_near_miss(scene, file, &track, false, &mut issues);
         }
     }
@@ -107,8 +109,20 @@ fn attach_target(attach: &Attach) -> Option<&str> {
 pub fn uneven_spacing(scene: &Scene, file: &str) -> Vec<LintIssue> {
     let mut issues = Vec::new();
     for siblings in sibling_groups(scene) {
-        emit_uneven(file, &spatial::rows(&siblings), "horizontal", &mut issues);
-        emit_uneven(file, &spatial::columns(&siblings), "vertical", &mut issues);
+        let parent = siblings.first().and_then(|c| c.parent.as_deref());
+        let obstacles = spatial::sibling_container_rects(scene, parent);
+        emit_uneven(
+            file,
+            &spatial::rows_with_obstacles(&siblings, &obstacles),
+            "horizontal",
+            &mut issues,
+        );
+        emit_uneven(
+            file,
+            &spatial::columns_with_obstacles(&siblings, &obstacles),
+            "vertical",
+            &mut issues,
+        );
     }
     issues
 }

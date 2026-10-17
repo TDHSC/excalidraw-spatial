@@ -112,16 +112,44 @@ pub struct Track {
     pub pos: f64,
 }
 
+pub fn sibling_container_rects(scene: &Scene, parent: Option<&str>) -> Vec<Rect> {
+    scene
+        .containers
+        .iter()
+        .filter(|c| c.parent.as_deref() == parent)
+        .map(|c| c.rect)
+        .collect()
+}
+
 pub fn rows(siblings: &[&Component]) -> Vec<Track> {
-    let raw_rows = cluster(siblings, Axis::Row);
-    let raw_cols = cluster(siblings, Axis::Column);
-    split_tracks(siblings, raw_rows, &raw_cols, Axis::Row)
+    rows_with_obstacles(siblings, &[])
 }
 
 pub fn columns(siblings: &[&Component]) -> Vec<Track> {
+    columns_with_obstacles(siblings, &[])
+}
+
+pub fn rows_with_obstacles(siblings: &[&Component], obstacles: &[Rect]) -> Vec<Track> {
+    tracks_with_obstacles(siblings, obstacles, Axis::Row)
+}
+
+pub fn columns_with_obstacles(siblings: &[&Component], obstacles: &[Rect]) -> Vec<Track> {
+    tracks_with_obstacles(siblings, obstacles, Axis::Column)
+}
+
+fn tracks_with_obstacles(siblings: &[&Component], obstacles: &[Rect], axis: Axis) -> Vec<Track> {
     let raw_rows = cluster(siblings, Axis::Row);
     let raw_cols = cluster(siblings, Axis::Column);
-    split_tracks(siblings, raw_cols, &raw_rows, Axis::Column)
+    let (tracks, orthogonal) = match axis {
+        Axis::Row => (raw_rows, raw_cols),
+        Axis::Column => (raw_cols, raw_rows),
+    };
+    let tracks = split_tracks(siblings, tracks, &orthogonal, axis);
+    if obstacles.is_empty() {
+        tracks
+    } else {
+        split_tracks_by_obstacles(siblings, tracks, obstacles, axis)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -214,6 +242,82 @@ fn split_tracks(
         .into_iter()
         .flat_map(|track| split_one(track, orthogonal, &lookup, axis))
         .collect()
+}
+
+fn split_tracks_by_obstacles(
+    siblings: &[&Component],
+    tracks: Vec<Track>,
+    obstacles: &[Rect],
+    axis: Axis,
+) -> Vec<Track> {
+    let lookup: HashMap<&str, &Component> = siblings.iter().map(|c| (c.id.as_str(), *c)).collect();
+    tracks
+        .into_iter()
+        .flat_map(|track| split_one_by_obstacles(track, obstacles, &lookup, axis))
+        .collect()
+}
+
+fn obstacle_between(a: &Component, b: &Component, obstacle: &Rect, axis: Axis) -> bool {
+    match axis {
+        Axis::Row => {
+            obstacle.x1 < b.rect.x1
+                && obstacle.x2 > a.rect.x2
+                && obstacle.y1 < a.rect.y2.min(b.rect.y2)
+                && obstacle.y2 > a.rect.y1.max(b.rect.y1)
+        }
+        Axis::Column => {
+            obstacle.y1 < b.rect.y1
+                && obstacle.y2 > a.rect.y2
+                && obstacle.x1 < a.rect.x2.min(b.rect.x2)
+                && obstacle.x2 > a.rect.x1.max(b.rect.x1)
+        }
+    }
+}
+
+fn split_one_by_obstacles(
+    track: Track,
+    obstacles: &[Rect],
+    lookup: &HashMap<&str, &Component>,
+    axis: Axis,
+) -> Vec<Track> {
+    if track.members.len() < 2 {
+        return Vec::new();
+    }
+    let members: Vec<&Component> = track.members.iter().map(|id| lookup[id.as_str()]).collect();
+    let mut cut_after = vec![false; members.len().saturating_sub(1)];
+    for i in 0..members.len().saturating_sub(1) {
+        if obstacles
+            .iter()
+            .any(|obstacle| obstacle_between(members[i], members[i + 1], obstacle, axis))
+        {
+            cut_after[i] = true;
+        }
+    }
+    if !cut_after.iter().any(|&cut| cut) {
+        return vec![track];
+    }
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, cut) in cut_after.iter().enumerate() {
+        if *cut {
+            if i + 1 - start >= 2 {
+                out.push(track_from_members(
+                    &members[start..=i],
+                    track.parent.clone(),
+                    axis,
+                ));
+            }
+            start = i + 1;
+        }
+    }
+    if members.len() - start >= 2 {
+        out.push(track_from_members(
+            &members[start..],
+            track.parent.clone(),
+            axis,
+        ));
+    }
+    out
 }
 
 fn split_one(
@@ -731,5 +835,73 @@ mod tests {
         // gaps: bot_b.x1 - bot_a.x2 = 300-240 = 60
         assert_eq!(rs[1].gaps, [60.0]);
         approx_eq(rs[1].pos, 260.0);
+    }
+
+    #[test]
+    fn b21_obstacle_splits_row_across_nested_sub_zone() {
+        // Fixture F21 serving pipeline: five siblings on one row, with a nested
+        // sub-zone sitting in the 420px gap between blender and l1_ranker.
+        let search_ui = shape_xywh("search_ui", 40.0, 220.0, 160.0, 80.0, 2);
+        let q_rewrite = shape_xywh("q_rewrite", 260.0, 220.0, 160.0, 80.0, 3);
+        let blender = shape_xywh("blender", 510.0, 220.0, 160.0, 80.0, 4);
+        let l1_ranker = shape_xywh("l1_ranker", 1090.0, 220.0, 160.0, 80.0, 10);
+        let l2_reranker = shape_xywh("l2_reranker", 1310.0, 220.0, 160.0, 80.0, 11);
+        let siblings = [&search_ui, &q_rewrite, &blender, &l1_ranker, &l2_reranker];
+
+        let unsplit = rows(&siblings);
+        assert_eq!(unsplit.len(), 1);
+        assert_eq!(
+            unsplit[0].members,
+            [
+                "search_ui",
+                "q_rewrite",
+                "blender",
+                "l1_ranker",
+                "l2_reranker"
+            ]
+        );
+        assert_eq!(unsplit[0].gaps, [60.0, 90.0, 420.0, 60.0]);
+        approx_eq(unsplit[0].pos, 260.0);
+
+        let obstacle = Rect::from_xywh(730.0, 60.0, 300.0, 420.0);
+        let split = rows_with_obstacles(&siblings, &[obstacle]);
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].members, ["search_ui", "q_rewrite", "blender"]);
+        assert_eq!(split[0].gaps, [60.0, 90.0]);
+        approx_eq(split[0].pos, 260.0);
+        assert_eq!(split[1].members, ["l1_ranker", "l2_reranker"]);
+        assert_eq!(split[1].gaps, [60.0]);
+        approx_eq(split[1].pos, 260.0);
+
+        // An obstacle above the shared row band must not split the track.
+        let above = Rect::from_xywh(730.0, 0.0, 300.0, 180.0);
+        let kept = rows_with_obstacles(&siblings, &[above]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].members, unsplit[0].members);
+        assert_eq!(kept[0].gaps, unsplit[0].gaps);
+    }
+
+    #[test]
+    fn b21_obstacle_splits_vertical_column() {
+        let n1 = shape_xywh("n1", 100.0, 0.0, 160.0, 80.0, 0);
+        let n2 = shape_xywh("n2", 100.0, 120.0, 160.0, 80.0, 1);
+        let n3 = shape_xywh("n3", 100.0, 440.0, 160.0, 80.0, 2);
+        let n4 = shape_xywh("n4", 100.0, 560.0, 160.0, 80.0, 3);
+        let siblings = [&n1, &n2, &n3, &n4];
+
+        let unsplit = columns(&siblings);
+        assert_eq!(unsplit.len(), 1);
+        assert_eq!(unsplit[0].members, ["n1", "n2", "n3", "n4"]);
+        assert_eq!(unsplit[0].gaps, [40.0, 240.0, 40.0]);
+
+        let obstacle = Rect::from_xywh(60.0, 240.0, 240.0, 160.0);
+        let split = columns_with_obstacles(&siblings, &[obstacle]);
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].members, ["n1", "n2"]);
+        assert_eq!(split[0].gaps, [40.0]);
+        approx_eq(split[0].pos, 180.0);
+        assert_eq!(split[1].members, ["n3", "n4"]);
+        assert_eq!(split[1].gaps, [40.0]);
+        approx_eq(split[1].pos, 180.0);
     }
 }

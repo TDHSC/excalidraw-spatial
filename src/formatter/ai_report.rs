@@ -178,9 +178,11 @@ fn track_lines(scene: &Scene, axis: Axis) -> Vec<String> {
     let groups = sibling_groups(scene);
     let mut lines = Vec::new();
     for components in groups {
+        let parent = components.first().and_then(|c| c.parent.as_deref());
+        let obstacles = spatial::sibling_container_rects(scene, parent);
         let mut tracks = match axis {
-            Axis::Row => spatial::rows(&components),
-            Axis::Column => spatial::columns(&components),
+            Axis::Row => spatial::rows_with_obstacles(&components, &obstacles),
+            Axis::Column => spatial::columns_with_obstacles(&components, &obstacles),
         };
         tracks.sort_by(|a, b| a.pos.total_cmp(&b.pos));
         for track in tracks {

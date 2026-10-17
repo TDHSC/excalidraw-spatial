@@ -184,16 +184,18 @@ fn cotranslate_orthogonal_stacks(
         if node.kind != ComponentKind::Shape && node.kind != ComponentKind::Group {
             continue;
         }
-        let sib = sibling_nodes(scene, node.parent.as_deref());
+        let parent = node.parent.as_deref();
+        let sib = sibling_nodes(scene, parent);
+        let obstacles = spatial::sibling_container_rects(scene, parent);
         let ortho = if horizontal {
-            spatial::columns(&sib)
+            spatial::columns_with_obstacles(&sib, &obstacles)
         } else {
-            spatial::rows(&sib)
+            spatial::rows_with_obstacles(&sib, &obstacles)
         };
         let parallel = if horizontal {
-            spatial::rows(&sib)
+            spatial::rows_with_obstacles(&sib, &obstacles)
         } else {
-            spatial::columns(&sib)
+            spatial::columns_with_obstacles(&sib, &obstacles)
         };
         let Some(stack) = unique_track(&ortho, &id) else {
             continue;
