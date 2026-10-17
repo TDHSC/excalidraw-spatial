@@ -1,12 +1,17 @@
-use crate::geometry::{ceil_px, Point, Rect};
-use crate::linter::text_factor;
+use crate::geometry::{ceil_px, clip_segment, Point, Rect};
+use crate::linter::{text_factor, BINDING_GAP_BASE, SHAPE_TYPES};
 use crate::mutator::ops::{relative_xy, RelativePlace};
-use crate::mutator::sync_bindings::bound_text_xy;
-use crate::scene_graph::{ComponentKind, ContainerKind, Scene, Target};
+use crate::mutator::sync_bindings::{
+    bound_text_xy, clip_straight_points, elbow_two_point_route, focus_point, place_label,
+    round_json, write_arrow_points,
+};
+use crate::scene_graph::{
+    Attach, Component, ComponentKind, Container, ContainerKind, Scene, Target,
+};
 use crate::schema::{json_num, Document};
 use crate::spatial;
 use crate::text_metrics;
-use crate::{DrawCommands, DrawShape, PlaceAlign, StrokeStyle};
+use crate::{DrawCommands, DrawShape, PlaceAlign, Side, StrokeStyle};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AuthorReport {
@@ -403,6 +408,7 @@ pub fn apply_draw(
             in_container,
             from,
             edge_label,
+            elbow,
             width,
             height,
             bg,
@@ -410,8 +416,6 @@ pub fn apply_draw(
             stroke_style,
             ..
         } => {
-            // The connector itself is wired in T36.
-            // Gap still accounts for `--edge-label` when `--from` is set.
             let label = label.as_deref().map(normalize_text);
             let edge_label = edge_label.as_deref().map(normalize_text);
             let gap_label = if from.is_some() {
@@ -419,7 +423,7 @@ pub fn apply_draw(
             } else {
                 None
             };
-            draw_node(
+            let mut report = draw_node(
                 doc,
                 NodeDraw {
                     id,
@@ -447,11 +451,53 @@ pub fn apply_draw(
                     },
                     now_ms,
                 },
-            )
+            )?;
+            if let Some(from_id) = from {
+                let connected = draw_connect(
+                    doc,
+                    ConnectDraw {
+                        from: from_id,
+                        to: id,
+                        id: None,
+                        label: edge_label.as_deref(),
+                        elbow: *elbow,
+                        via: None,
+                        from_side: None,
+                        to_side: None,
+                        now_ms,
+                    },
+                )?;
+                report.added += connected.added;
+                report.updated += connected.updated;
+            }
+            Ok(report)
         }
-        DrawCommands::Connect { label, .. } => {
-            let _ = label.as_deref().map(normalize_text);
-            anyhow::bail!("not implemented")
+        DrawCommands::Connect {
+            from,
+            to,
+            id,
+            label,
+            elbow,
+            via,
+            from_side,
+            to_side,
+            ..
+        } => {
+            let label = label.as_deref().map(normalize_text);
+            draw_connect(
+                doc,
+                ConnectDraw {
+                    from,
+                    to,
+                    id: id.as_deref(),
+                    label: label.as_deref(),
+                    elbow: *elbow,
+                    via: via.as_deref(),
+                    from_side: from_side.as_ref(),
+                    to_side: to_side.as_ref(),
+                    now_ms,
+                },
+            )
         }
         DrawCommands::Zone {
             id,
@@ -793,6 +839,515 @@ struct TextDraw<'a> {
     place: Placement<'a>,
     font_size: Option<f64>,
     now_ms: i64,
+}
+
+struct ConnectDraw<'a> {
+    from: &'a str,
+    to: &'a str,
+    id: Option<&'a str>,
+    label: Option<&'a str>,
+    elbow: bool,
+    via: Option<&'a str>,
+    from_side: Option<&'a Side>,
+    to_side: Option<&'a Side>,
+    now_ms: i64,
+}
+
+struct Endpoint {
+    target: String,
+    elem_id: String,
+    rect: Rect,
+    gap: f64,
+    frame_id: Option<String>,
+}
+
+fn draw_connect(doc: &mut Document, cmd: ConnectDraw<'_>) -> anyhow::Result<AuthorReport> {
+    if cmd.via.is_some() {
+        anyhow::bail!("not implemented");
+    }
+    let scene = Scene::build(doc);
+    let start = resolve_endpoint(&scene, doc, cmd.from)?;
+    let end = resolve_endpoint(&scene, doc, cmd.to)?;
+    if start.target == end.target {
+        anyhow::bail!("cannot connect {} to itself", start.target);
+    }
+    let arrow_id = match cmd.id {
+        Some(id) => {
+            validate_new_id(doc, &scene, id)?;
+            id.to_string()
+        }
+        None => derived_connector_id(doc, &start.target, &end.target),
+    };
+
+    let (start_fp, end_fp) = choose_fixed_points(&scene, &start, &end, &cmd);
+    let existing =
+        if !cmd.elbow && cmd.via.is_none() && cmd.from_side.is_none() && cmd.to_side.is_none() {
+            parallel_arrows(&scene, &start.target, &end.target)
+        } else {
+            Vec::new()
+        };
+    let horizontal = (end.rect.center().x - start.rect.center().x).abs()
+        >= (end.rect.center().y - start.rect.center().y).abs();
+    let slot = if existing.is_empty() {
+        None
+    } else {
+        Some(existing.len())
+    };
+    let (start_fp, end_fp) = match slot {
+        Some(k) => spread_fixed_points(&start.rect, &end.rect, horizontal, existing.len() + 1, k),
+        None => (quantize_fp(start_fp), quantize_fp(end_fp)),
+    };
+    let abs = route_points(&start, &end, start_fp, end_fp, cmd.elbow, horizontal);
+    let updated = if existing.is_empty() {
+        0
+    } else {
+        spread_existing(doc, &existing, horizontal)
+    };
+
+    let frame_id = shared_frame(&start.frame_id, &end.frame_id);
+    let label_id = cmd.label.map(|_| derived_label_id(doc, &arrow_id));
+    let origin = abs.first().copied().unwrap_or(Point { x: 0.0, y: 0.0 });
+    let mut arrow = arrow_element(
+        &arrow_id,
+        origin,
+        0.0,
+        0.0,
+        &[[0.0, 0.0]],
+        &ArrowEnds {
+            start: Some(binding_value(&start.elem_id, start_fp)),
+            end: Some(binding_value(&end.elem_id, end_fp)),
+            elbowed: cmd.elbow,
+            bound_label: label_id.clone(),
+            frame_id: frame_id.clone(),
+        },
+        cmd.now_ms,
+    );
+    if let Some(obj) = arrow.as_object_mut() {
+        if frame_id.is_none() {
+            obj.insert("frameId".to_string(), serde_json::Value::Null);
+        }
+    }
+    let label = cmd.label.zip(label_id.as_deref()).map(|(text, label_id)| {
+        let (tw, th) = text_metrics::estimate(text, 16.0, 1.25);
+        text_element(
+            label_id,
+            Rect::from_xywh(0.0, 0.0, tw, th),
+            text,
+            cmd.now_ms,
+            &TextStyle {
+                font_size: 16.0,
+                text_align: "center",
+                vertical_align: "middle",
+                container_id: Some(&arrow_id),
+                frame_id: frame_id.as_deref(),
+            },
+        )
+    });
+    let insert_at = frame_id.as_deref().and_then(|id| raw_index(doc, id));
+    insert_pair(doc, insert_at, arrow, label);
+    write_arrow_points(doc, &arrow_id, &abs);
+    if let Some(label_id) = &label_id {
+        let mut moved = std::collections::HashMap::new();
+        place_label(doc, label_id, &abs, 0.5, &mut moved);
+    }
+    doc.push_bound_element(&start.elem_id, "arrow", &arrow_id);
+    doc.push_bound_element(&end.elem_id, "arrow", &arrow_id);
+    Ok(AuthorReport {
+        added: 1,
+        updated,
+        removed: 0,
+    })
+}
+
+fn resolve_endpoint(scene: &Scene, doc: &Document, raw: &str) -> anyhow::Result<Endpoint> {
+    let target = scene.resolve(raw)?;
+    let (id, elem_id, frame_id) = match target {
+        Target::Component(id) => {
+            let component = scene
+                .component(&id)
+                .ok_or_else(|| anyhow::anyhow!("unknown id \"{raw}\""))?;
+            if component.kind == ComponentKind::Text {
+                anyhow::bail!(
+                    "cannot connect {raw}: endpoint must be a shape, group, or container"
+                );
+            }
+            let elem_id = bind_elem_id(doc, component);
+            (id, elem_id, component.frame_id.clone())
+        }
+        Target::Container(id) => {
+            let container = scene
+                .container(&id)
+                .ok_or_else(|| anyhow::anyhow!("unknown id \"{raw}\""))?;
+            let elem_id = container
+                .elements
+                .first()
+                .cloned()
+                .unwrap_or_else(|| id.clone());
+            let frame_id = container_frame_id(container);
+            (id, elem_id, frame_id)
+        }
+        Target::Connector(_) => {
+            anyhow::bail!("cannot connect {raw}: endpoint must be a shape, group, or container");
+        }
+    };
+    let el = doc
+        .element(&elem_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown id \"{raw}\""))?;
+    Ok(Endpoint {
+        target: id,
+        rect: el.rect(),
+        gap: BINDING_GAP_BASE as f64 + el.stroke_width() / 2.0,
+        frame_id,
+        elem_id,
+    })
+}
+
+fn bind_elem_id(doc: &Document, component: &Component) -> String {
+    if component.kind != ComponentKind::Group {
+        return component
+            .elements
+            .first()
+            .cloned()
+            .unwrap_or_else(|| component.id.clone());
+    }
+    // Group components store member ids only. The largest shape member is
+    // the bindable face; a group with no shape falls back to the first member.
+    component
+        .elements
+        .iter()
+        .filter_map(|id| {
+            let el = doc.element(id)?;
+            SHAPE_TYPES
+                .contains(&el.element_type.as_str())
+                .then(|| (el.rect().area(), id.clone()))
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, id)| id)
+        .or_else(|| component.elements.first().cloned())
+        .unwrap_or_else(|| component.id.clone())
+}
+
+fn container_frame_id(container: &Container) -> Option<String> {
+    if container.kind == ContainerKind::Frame {
+        Some(container.id.clone())
+    } else {
+        container.frame_id.clone()
+    }
+}
+
+fn shared_frame(start: &Option<String>, end: &Option<String>) -> Option<String> {
+    match (start, end) {
+        (Some(start), Some(end)) if start == end => Some(start.clone()),
+        _ => None,
+    }
+}
+
+fn side_fp(side: &Side) -> [f64; 2] {
+    match side {
+        Side::Left => [0.0, 0.5],
+        Side::Right => [1.0, 0.5],
+        Side::Top => [0.5, 0.0],
+        Side::Bottom => [0.5, 1.0],
+    }
+}
+
+fn horizontal_pair(start: &Rect, end: &Rect) -> ([f64; 2], [f64; 2]) {
+    if end.center().x >= start.center().x {
+        ([1.0, 0.5], [0.0, 0.5])
+    } else {
+        ([0.0, 0.5], [1.0, 0.5])
+    }
+}
+
+fn vertical_pair(start: &Rect, end: &Rect) -> ([f64; 2], [f64; 2]) {
+    if end.center().y >= start.center().y {
+        ([0.5, 1.0], [0.5, 0.0])
+    } else {
+        ([0.5, 0.0], [0.5, 1.0])
+    }
+}
+
+fn axis_overlap(a: &Rect, b: &Rect) -> bool {
+    a.x1 < b.x2 && b.x1 < a.x2 && a.y1 < b.y2 && b.y1 < a.y2
+}
+
+fn choose_fixed_points(
+    scene: &Scene,
+    start: &Endpoint,
+    end: &Endpoint,
+    cmd: &ConnectDraw<'_>,
+) -> ([f64; 2], [f64; 2]) {
+    let sc = start.rect.center();
+    let ec = end.rect.center();
+    let horizontal = (ec.x - sc.x).abs() >= (ec.y - sc.y).abs();
+    let h_pair = horizontal_pair(&start.rect, &end.rect);
+    let v_pair = vertical_pair(&start.rect, &end.rect);
+    let (start_fp, end_fp) = if cmd.from_side.is_some() || cmd.to_side.is_some() {
+        let start_fp =
+            cmd.from_side
+                .map(side_fp)
+                .unwrap_or(if horizontal { h_pair.0 } else { v_pair.0 });
+        let end_fp =
+            cmd.to_side
+                .map(side_fp)
+                .unwrap_or(if horizontal { h_pair.1 } else { v_pair.1 });
+        (start_fp, end_fp)
+    } else if cmd.elbow && !axis_overlap(&start.rect, &end.rect) {
+        let h_hits = route_node_hits(scene, start, end, h_pair.0, h_pair.1, true);
+        let v_hits = route_node_hits(scene, start, end, v_pair.0, v_pair.1, false);
+        if h_hits < v_hits || (h_hits == v_hits && horizontal) {
+            h_pair
+        } else {
+            v_pair
+        }
+    } else if horizontal {
+        h_pair
+    } else {
+        v_pair
+    };
+    (start_fp, end_fp)
+}
+
+fn route_node_hits(
+    scene: &Scene,
+    start: &Endpoint,
+    end: &Endpoint,
+    start_fp: [f64; 2],
+    end_fp: [f64; 2],
+    horizontal: bool,
+) -> usize {
+    let s_pt = point_on_inflated(&start.rect, start.gap, start_fp);
+    let e_pt = point_on_inflated(&end.rect, end.gap, end_fp);
+    let route = if (e_pt.x - s_pt.x).abs() > 0.5 && (e_pt.y - s_pt.y).abs() > 0.5 {
+        elbow_two_point_route(s_pt, e_pt, horizontal, &start.rect, &end.rect)
+    } else {
+        vec![s_pt, e_pt]
+    };
+    scene
+        .nodes()
+        .into_iter()
+        .filter(|node| node.id != start.target && node.id != end.target)
+        .filter(|node| {
+            route
+                .windows(2)
+                .any(|seg| clip_segment(seg[0], seg[1], &node.rect.inflate(-2.0)).is_some())
+        })
+        .count()
+}
+
+fn parallel_arrows(scene: &Scene, from_target: &str, to_target: &str) -> Vec<String> {
+    scene
+        .connectors
+        .iter()
+        .filter(|conn| {
+            conn.kind == "arrow"
+                && !conn.elbowed
+                && conn.points.len() == 2
+                && bound_pair(&conn.start, &conn.end, from_target, to_target)
+        })
+        .map(|conn| conn.id.clone())
+        .collect()
+}
+
+fn bound_pair(start: &Attach, end: &Attach, from_target: &str, to_target: &str) -> bool {
+    let (Attach::Bound { target: a, .. }, Attach::Bound { target: b, .. }) = (start, end) else {
+        return false;
+    };
+    (a == from_target && b == to_target) || (a == to_target && b == from_target)
+}
+
+fn spread_fixed_points(
+    start: &Rect,
+    end: &Rect,
+    horizontal: bool,
+    total: usize,
+    k: usize,
+) -> ([f64; 2], [f64; 2]) {
+    let t = (k + 1) as f64 / (total + 1) as f64;
+    let (lo, hi) = cross_overlap(start, end, horizontal);
+    let (u_s, u_e) = if hi > lo {
+        let c = lo + t * (hi - lo);
+        if horizontal {
+            (
+                ((c - start.y1) / start.height()).clamp(0.15, 0.85),
+                ((c - end.y1) / end.height()).clamp(0.15, 0.85),
+            )
+        } else {
+            (
+                ((c - start.x1) / start.width()).clamp(0.15, 0.85),
+                ((c - end.x1) / end.width()).clamp(0.15, 0.85),
+            )
+        }
+    } else {
+        let u = (0.2 + 0.6 * t).clamp(0.15, 0.85);
+        (u, u)
+    };
+    facing_fp(start, end, horizontal, round_json(u_s), round_json(u_e))
+}
+
+fn cross_overlap(start: &Rect, end: &Rect, horizontal: bool) -> (f64, f64) {
+    if horizontal {
+        (start.y1.max(end.y1), start.y2.min(end.y2))
+    } else {
+        (start.x1.max(end.x1), start.x2.min(end.x2))
+    }
+}
+
+fn facing_fp(
+    start: &Rect,
+    end: &Rect,
+    horizontal: bool,
+    u_s: f64,
+    u_e: f64,
+) -> ([f64; 2], [f64; 2]) {
+    if horizontal {
+        let start_x = if end.center().x >= start.center().x {
+            1.0
+        } else {
+            0.0
+        };
+        ([start_x, u_s], [1.0 - start_x, u_e])
+    } else {
+        let start_y = if end.center().y >= start.center().y {
+            1.0
+        } else {
+            0.0
+        };
+        ([u_s, start_y], [u_e, 1.0 - start_y])
+    }
+}
+
+fn spread_existing(doc: &mut Document, existing: &[String], horizontal: bool) -> usize {
+    let total = existing.len() + 1;
+    for (k, id) in existing.iter().enumerate() {
+        let Some((ar_s, ar_e, label_id)) = arrow_end_rects(doc, id) else {
+            continue;
+        };
+        let (start_fp, end_fp) = spread_fixed_points(&ar_s, &ar_e, horizontal, total, k);
+        set_fixed_point(doc, id, "startBinding", start_fp);
+        set_fixed_point(doc, id, "endBinding", end_fp);
+        let gs = gap_of(doc, &binding_element(doc, id, "startBinding"));
+        let ge = gap_of(doc, &binding_element(doc, id, "endBinding"));
+        let focus_s = focus_point(&ar_s, Some(start_fp));
+        let focus_e = focus_point(&ar_e, Some(end_fp));
+        let abs = clip_straight_points(&ar_s, gs, focus_s, &ar_e, ge, focus_e)
+            .unwrap_or_else(|| vec![focus_s, focus_e]);
+        write_arrow_points(doc, id, &abs);
+        doc.refresh();
+        if let Some(label_id) = label_id {
+            let mut moved = std::collections::HashMap::new();
+            place_label(doc, &label_id, &abs, 0.5, &mut moved);
+            doc.refresh();
+        }
+    }
+    existing.len()
+}
+
+fn arrow_end_rects(doc: &Document, id: &str) -> Option<(Rect, Rect, Option<String>)> {
+    let start_id = binding_element(doc, id, "startBinding")?;
+    let end_id = binding_element(doc, id, "endBinding")?;
+    let start = doc.element(&start_id)?.rect();
+    let end = doc.element(&end_id)?.rect();
+    let label = doc
+        .value
+        .get("elements")
+        .and_then(|els| els.as_array())
+        .and_then(|els| els.iter().find(|el| el["id"] == id))
+        .and_then(|el| el.get("boundElements"))
+        .and_then(|bound| bound.as_array())
+        .and_then(|bound| {
+            bound.iter().find_map(|entry| {
+                (entry["type"] == "text").then(|| entry["id"].as_str().map(str::to_string))
+            })
+        })
+        .flatten();
+    Some((start, end, label))
+}
+
+fn binding_element(doc: &Document, id: &str, key: &str) -> Option<String> {
+    doc.value
+        .get("elements")
+        .and_then(|els| els.as_array())
+        .and_then(|els| els.iter().find(|el| el["id"] == id))
+        .and_then(|el| el.get(key))
+        .and_then(|binding| binding.get("elementId"))
+        .and_then(|id| id.as_str())
+        .map(str::to_string)
+}
+
+fn gap_of(doc: &Document, elem_id: &Option<String>) -> f64 {
+    elem_id
+        .as_deref()
+        .and_then(|id| doc.element(id))
+        .map(|el| BINDING_GAP_BASE as f64 + el.stroke_width() / 2.0)
+        .unwrap_or(BINDING_GAP_BASE as f64 + 1.0)
+}
+
+fn set_fixed_point(doc: &mut Document, id: &str, key: &str, fp: [f64; 2]) {
+    let Some(el) = doc
+        .value
+        .get_mut("elements")
+        .and_then(|els| els.as_array_mut())
+        .and_then(|els| els.iter_mut().find(|el| el["id"] == id))
+        .and_then(|el| el.as_object_mut())
+    else {
+        return;
+    };
+    let mut binding = el
+        .get(key)
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    binding.insert(
+        "fixedPoint".to_string(),
+        serde_json::json!([json_num(fp[0]), json_num(fp[1])]),
+    );
+    el.insert(key.to_string(), serde_json::Value::Object(binding));
+}
+
+fn quantize_fp(fp: [f64; 2]) -> [f64; 2] {
+    [round_json(fp[0]), round_json(fp[1])]
+}
+
+fn point_on_inflated(rect: &Rect, gap: f64, fp: [f64; 2]) -> Point {
+    let inflated = rect.inflate(gap);
+    Point {
+        x: inflated.x1 + fp[0] * inflated.width(),
+        y: inflated.y1 + fp[1] * inflated.height(),
+    }
+}
+
+fn route_points(
+    start: &Endpoint,
+    end: &Endpoint,
+    start_fp: [f64; 2],
+    end_fp: [f64; 2],
+    elbow: bool,
+    _center_horizontal: bool,
+) -> Vec<Point> {
+    if elbow {
+        let s_pt = point_on_inflated(&start.rect, start.gap, start_fp);
+        let e_pt = point_on_inflated(&end.rect, end.gap, end_fp);
+        let horizontal = (start_fp[1] - 0.5).abs() < 1e-6;
+        if (e_pt.x - s_pt.x).abs() > 0.5 && (e_pt.y - s_pt.y).abs() > 0.5 {
+            elbow_two_point_route(s_pt, e_pt, horizontal, &start.rect, &end.rect)
+        } else {
+            vec![s_pt, e_pt]
+        }
+    } else {
+        let focus_s = focus_point(&start.rect, Some(start_fp));
+        let focus_e = focus_point(&end.rect, Some(end_fp));
+        clip_straight_points(&start.rect, start.gap, focus_s, &end.rect, end.gap, focus_e)
+            .unwrap_or_else(|| vec![focus_s, focus_e])
+    }
+}
+
+fn binding_value(elem_id: &str, fp: [f64; 2]) -> serde_json::Value {
+    serde_json::json!({
+        "elementId": elem_id,
+        "fixedPoint": [json_num(fp[0]), json_num(fp[1])],
+        "mode": "orbit",
+    })
 }
 
 fn draw_text(doc: &mut Document, text: TextDraw<'_>) -> anyhow::Result<AuthorReport> {

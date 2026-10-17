@@ -27,7 +27,7 @@ pub(crate) fn bound_text_xy(
     (x, y)
 }
 
-fn round_json(v: f64) -> f64 {
+pub(crate) fn round_json(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
@@ -66,7 +66,7 @@ fn unordered_pair(start: &str, end: &str) -> (String, String) {
     }
 }
 
-fn focus_point(rect: &Rect, fixed: Option<[f64; 2]>) -> Point {
+pub(crate) fn focus_point(rect: &Rect, fixed: Option<[f64; 2]>) -> Point {
     match fixed {
         Some([fx, fy]) => Point {
             x: rect.x1 + fx * rect.width(),
@@ -220,6 +220,37 @@ fn end_geom(
     }
 }
 
+pub(crate) fn clip_straight_points(
+    s_rect: &Rect,
+    gs: f64,
+    focus_s: Point,
+    e_rect: &Rect,
+    ge: f64,
+    focus_e: Point,
+) -> Option<Vec<Point>> {
+    let cs = clip_segment(focus_s, focus_e, &s_rect.inflate(gs));
+    let ce = clip_segment(focus_s, focus_e, &e_rect.inflate(ge));
+    if let (Some(cs), Some(ce)) = (cs, ce) {
+        if cs.1 < ce.0 {
+            return Some(vec![
+                lerp(focus_s, focus_e, cs.1),
+                lerp(focus_s, focus_e, ce.0),
+            ]);
+        }
+    }
+    let cs0 = clip_segment(focus_s, focus_e, s_rect);
+    let ce0 = clip_segment(focus_s, focus_e, e_rect);
+    if let (Some(cs0), Some(ce0)) = (cs0, ce0) {
+        if cs0.1 < ce0.0 {
+            return Some(vec![
+                lerp(focus_s, focus_e, cs0.1),
+                lerp(focus_s, focus_e, ce0.0),
+            ]);
+        }
+    }
+    None
+}
+
 fn route_hits_inset(route: &[Point], s_rect: &Rect, e_rect: &Rect) -> bool {
     let s_inset = s_rect.inflate(-2.0);
     let e_inset = e_rect.inflate(-2.0);
@@ -229,7 +260,7 @@ fn route_hits_inset(route: &[Point], s_rect: &Rect, e_rect: &Rect) -> bool {
     })
 }
 
-fn elbow_two_point_route(
+pub(crate) fn elbow_two_point_route(
     s: Point,
     e: Point,
     horizontal: bool,
@@ -256,7 +287,7 @@ fn elbow_two_point_route(
     }
 }
 
-fn write_arrow_points(doc: &mut Document, id: &str, abs: &[Point]) {
+pub(crate) fn write_arrow_points(doc: &mut Document, id: &str, abs: &[Point]) {
     if abs.is_empty() {
         return;
     }
@@ -281,7 +312,7 @@ fn write_arrow_points(doc: &mut Document, id: &str, abs: &[Point]) {
     doc.set_num(id, "height", max_y - min_y);
 }
 
-fn place_label(
+pub(crate) fn place_label(
     doc: &mut Document,
     label_id: &str,
     abs: &[Point],
@@ -411,29 +442,11 @@ pub(crate) fn sync_arrows(
                     },
                 ),
             ) {
-                let cs = clip_segment(gs.focus, ge.focus, &gs.rect.inflate(gs.gap));
-                let ce = clip_segment(gs.focus, ge.focus, &ge.rect.inflate(ge.gap));
-                if let (Some(cs), Some(ce)) = (cs, ce) {
-                    if cs.1 < ce.0 {
-                        abs = vec![
-                            lerp(gs.focus, ge.focus, cs.1),
-                            lerp(gs.focus, ge.focus, ce.0),
-                        ];
-                        used = true;
-                    }
-                }
-                if !used {
-                    let cs0 = clip_segment(gs.focus, ge.focus, &gs.rect);
-                    let ce0 = clip_segment(gs.focus, ge.focus, &ge.rect);
-                    if let (Some(cs0), Some(ce0)) = (cs0, ce0) {
-                        if cs0.1 < ce0.0 {
-                            abs = vec![
-                                lerp(gs.focus, ge.focus, cs0.1),
-                                lerp(gs.focus, ge.focus, ce0.0),
-                            ];
-                            used = true;
-                        }
-                    }
+                if let Some(clipped) =
+                    clip_straight_points(&gs.rect, gs.gap, gs.focus, &ge.rect, ge.gap, ge.focus)
+                {
+                    abs = clipped;
+                    used = true;
                 }
             }
         }
