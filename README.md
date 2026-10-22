@@ -183,15 +183,7 @@ The crate compiles both a library (`excalidraw_spatial` in `src/lib.rs`) and the
 
 ## Verification and Testing
 
-Run the Rust toolchain checks and test suites from the repository root:
-
-```sh
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-```
-
-Setting `EXCAL_FIXED_NOW_MS=1700000000000` pins element `created` and `updated` timestamps so `excal layout` and `excal draw` produce byte-for-byte deterministic JSON in tests.
+Run the Rust toolchain checks and test suites from the repository root. [`docs/testing.md`](docs/testing.md) documents the commands, their success and failure signals, and the deterministic timestamp setting used by integration tests.
 
 ---
 
